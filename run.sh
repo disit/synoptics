@@ -14,8 +14,8 @@
 cd "$(dirname "$0")"
 while true
 do
-  echo $(date) starting load... >> server-emulator-kpi.log
-  node server-emulator-kpi.js >> server-emulator-kpi.log 2>&1
-  sleep 5
+  echo $(date) starting load... >> new-server-dev.log
+  node new-server-dev.js >> new-server-dev.log 2>&1
+  sleep 1s
 done
 
