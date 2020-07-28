@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<!-- Synoptics.
+	 Copyright (C) 2019 DISIT Lab http://www.disit.org - University of Florence
+	
+	 This program is free software: you can redistribute it and/or modify
+	 it under the terms of the GNU Affero General Public License as
+	 published by the Free Software Foundation, either version 3 of the
+	 License, or (at your option) any later version.
+	 This program is distributed in the hope that it will be useful,
+	 but WITHOUT ANY WARRANTY; without even the implied warranty of
+	 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+	 GNU Affero General Public License for more details.
+	 You should have received a copy of the GNU Affero General Public License
+	 along with this program. If not, see <http://www.gnu.org/licenses/>. -->
+<html>
+	<head>
+		<title>Synoptic</title>
+		<script src="/synopticsdev/socket.io/socket.io.js"></script>
+		<script src="https://code.jquery.com/jquery-1.11.1.js"></script>
+		<script src="jsonpath-0.8.0.js"></script>
+		<script src="new.socket.io.worker.js"></script>
+		<script src="zoomHandler.js"></script>
+		<script>	
+			$(function() {			
+				var xhre = new XMLHttpRequest();
+				xhre.open('GET', 'new-config.js', true);
+				xhre.onload = function() {
+					eval(xhre.response);
+					var iddasboard = null;
+					if(document.referrer) document.referrer.replace(/[?&]+([^=&]+)=([^&]*)/gi, function(m,key,value) { if(key == "iddasboard") iddasboard = window.atob(value); });
+					if(iddasboard) {
+						var xhr = new XMLHttpRequest();
+						xhr.open("GET", config["getDashboardData"].replace("{0}",iddasboard), true);
+						xhr.onload = function() { 
+							if(JSON.parse(xhr.response).visibility == "public") {
+								new SIOW( 
+									{ "connPath": "/synopticsdev/socket.io", "queryString": document.location.search }, 
+									function() { document.location.href='new-ssynoptic.html'+document.location.search; } 
+								).start();
+							}
+							else {
+								document.location.href='new-ssynoptic.html'+document.location.search;
+							}
+						};
+						xhr.send();
+					}
+					else {
+						new SIOW( 
+							{ "connPath": "/synopticsdev/socket.io", "queryString": document.location.search }, 
+							function() { document.location.href='new-ssynoptic.html'+document.location.search; } 
+						).start();	
+					}
+				};
+				xhre.send();				
+			}); 
+		</script>
+	</head>
+	<body></body>
+</html>

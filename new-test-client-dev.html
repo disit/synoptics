@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<!-- Synoptics.
+	 Copyright (C) 2019 DISIT Lab http://www.disit.org - University of Florence
+	
+	 This program is free software: you can redistribute it and/or modify
+	 it under the terms of the GNU Affero General Public License as
+	 published by the Free Software Foundation, either version 3 of the
+	 License, or (at your option) any later version.
+	 This program is distributed in the hope that it will be useful,
+	 but WITHOUT ANY WARRANTY; without even the implied warranty of
+	 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+	 GNU Affero General Public License for more details.
+	 You should have received a copy of the GNU Affero General Public License
+	 along with this program. If not, see <http://www.gnu.org/licenses/>. -->
+<html>
+	<head>
+		<title>Test Client</title>
+		<script src="/synoptics/socket.io/socket.io.js"></script>
+		<script src="https://code.jquery.com/jquery-1.11.1.js"></script>
+		<script>
+		srvFailure = false;
+		$(function() { 
+			var socket = io.connect({path: "/synoptics/socket.io"}); 	
+			socket.on('connect', () => {			
+				if(srvFailure) {
+					document.location.href = window.location.search;
+					return;
+				}
+				console.log("Connected.");				
+				socket.on("display", function(data){console.log(JSON.parse(data))});
+				socket.on("authenticate", function(data){console.log(JSON.parse(data))});
+				socket.on("setSrcReq", function(data){console.log(JSON.parse(data))});
+				socket.on("setSrcId", function(data){console.log(JSON.parse(data))});
+				socket.on("read", function(data){console.log(JSON.parse(data))});
+				socket.on("write", function(data){console.log(JSON.parse(data))});
+				socket.on("subscribe", function(data){console.log(JSON.parse(data))});
+				socket.on("unsubscribe", function(data){console.log(JSON.parse(data))});
+				socket.on("clear", function(data){console.log(JSON.parse(data))});
+				socket.on("dump", function(data){console.log(JSON.parse(data))});
+				socket.on("help", function(data){console.log(JSON.parse(data))});
+				$("#send").on("click",function(){ 
+					if(["read","subscribe"].includes($("#eventName").val())) {
+						socket.off("update "+$("#eventPayload").val());
+						socket.on("update "+$("#eventPayload").val(), function(data){console.log(JSON.parse(data))});
+					}
+					if($("#eventName").val() != "write") {
+						socket.emit($("#eventName").val(),$("#eventPayload").val()); 
+					}					
+					else {
+						socket.emit($("#eventName").val(),JSON.stringify({ id: $("#eventPayloadId").val(), value: isNaN($("#eventPayloadValue").val())?$("#eventPayloadValue").val():parseFloat($("#eventPayloadValue").val()) })); 
+					}
+				});
+				$("#eventName").on("change",function(){
+					$("#payloadPar").show();
+					$("#send").show();
+					switch($("#eventName").val()) {
+						case "authenticate":
+							$("#eventPayload").show();
+							$("#eventPayloadId").hide();
+							$("#eventPayloadValue").hide();
+							$("#eventPayload").attr("placeholder","Put your access token here");
+							break;
+						case "setSrcReq":
+							$("#eventPayload").show();
+							$("#eventPayloadId").hide();
+							$("#eventPayloadValue").hide();
+							$("#eventPayload").attr("placeholder","Put the client application category here");
+							break;			
+						case "setSrcId":
+							$("#eventPayload").show();
+							$("#eventPayloadId").hide();
+							$("#eventPayloadValue").hide();
+							$("#eventPayload").attr("placeholder","Put the client application unique identifier here");
+							break;	
+						case "display":
+							$("#eventPayload").show();
+							$("#eventPayloadId").hide();
+							$("#eventPayloadValue").hide();
+							$("#eventPayload").attr("placeholder","Put the ID of the synoptic here");
+							break;
+						case "subscribe":
+							$("#eventPayload").show();
+							$("#eventPayloadId").hide();
+							$("#eventPayloadValue").hide();
+							$("#eventPayload").attr("placeholder","KPI ID, or IOTAPP-managed variable name, or device URI space valueName");
+							break;		
+						case "unsubscribe":
+							$("#eventPayload").show();
+							$("#eventPayloadId").hide();
+							$("#eventPayloadValue").hide();
+							$("#eventPayload").attr("placeholder","KPI ID, or IOTAPP-managed variable name, or device URI space valueName");
+							break;			
+						case "read":
+							$("#eventPayload").show();
+							$("#eventPayloadId").hide();
+							$("#eventPayloadValue").hide();
+							$("#eventPayload").attr("placeholder","KPI ID, or IOTAPP-managed variable name, or device URI space valueName");
+							break;	
+						case "clear":
+							$("#eventPayload").show();
+							$("#eventPayloadId").hide();
+							$("#eventPayloadValue").hide();
+							$("#eventPayload").attr("placeholder","KPI ID, or IOTAPP-managed variable name, or device URI space valueName");
+							break;	
+						case "dump":
+							$("#eventPayload").show();
+							$("#eventPayloadId").hide();
+							$("#eventPayloadValue").hide();
+							$("#eventPayload").attr("placeholder","Dump what?");
+							break;								
+						case "help":
+							$("#eventPayload").show();
+							$("#eventPayloadId").hide();
+							$("#eventPayloadValue").hide();
+							$("#eventPayload").attr("placeholder","Leave empty");
+							break;	
+						case "write":
+							$("#eventPayload").hide();
+							$("#eventPayloadId").show();
+							$("#eventPayloadValue").show();
+							$("#eventPayloadId").attr("placeholder","Put the KPI ID or the IOTAPP-managed variable name here");
+							$("#eventPayloadValue").attr("placeholder","Put the new value here");
+							break;	
+					}
+				});
+			});
+
+			socket.on('disconnect', function () { srvFailure = true; } );
+			
+		});
+		</script>
+	</head>
+	<body>
+		<h1>Socket Server Test Client</h1>
+		<p>Open the browser console to display messages.</p>
+		<form id="clientEvent">			
+			<p>Event Name: <select name="eventName" id="eventName"><option value=""></option><option value="authenticate">authenticate</option><option value="setSrcReq">setSrcReq</option><option value="setSrcId">setSrcId</option><option value="display">display</option><option value="subscribe">subscribe</option><option value="unsubscribe">unsubscribe</option><option value="read">read</option><option value="write">write</option><option value="clear">clear</option><option value="dump">dump</option><option value="help">help</option></select></p>
+			<p id="payloadPar" style="display:none;">Payload: <input type="text" name="eventPayload" id="eventPayload" style="display:none; width:40em;"><input type="text" name="eventPayloadId" id="eventPayloadId" style="display:none; width:40em; margin-right:2em;"><input type="text" name="eventPayloadValue" id="eventPayloadValue" style="display:none; width:40em;"></p>
+			<p><input type="button" id="send" value="Send" style="display:none;"></p>
+		</form>		
+	</body>
+</html>

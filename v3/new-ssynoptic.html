@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<!-- Synoptics.
+	 Copyright (C) 2019 DISIT Lab http://www.disit.org - University of Florence
+	
+	 This program is free software: you can redistribute it and/or modify
+	 it under the terms of the GNU Affero General Public License as
+	 published by the Free Software Foundation, either version 3 of the
+	 License, or (at your option) any later version.
+	 This program is distributed in the hope that it will be useful,
+	 but WITHOUT ANY WARRANTY; without even the implied warranty of
+	 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+	 GNU Affero General Public License for more details.
+	 You should have received a copy of the GNU Affero General Public License
+	 along with this program. If not, see <http://www.gnu.org/licenses/>. -->
+<html>
+	<head>
+		<title>Secure Synoptic</title>
+		<script src="/synopticsdev/socket.io/socket.io.js"></script>
+		<script src="https://code.jquery.com/jquery-1.11.1.js"></script>
+		<script src="https://www.snap4city.org/mypersonaldata/js/lib/keycloak.js"></script>
+		<script src="jsonpath-0.8.0.js"></script>
+		<script src="new.socket.io.worker.js"></script>
+		<script src="zoomHandler.js"></script>
+		<script>	
+			$(function() {
+				var xhr = new XMLHttpRequest();
+				xhr.open('GET', 'new-config.js', true);
+				xhr.onload = function() {
+					eval(xhr.response);
+					keycloak = Keycloak({
+						"realm": "master",
+						"url": config["keycloakAuth"],
+						"clientId": "js-synoptic-client"						
+					});
+					keycloak.init({
+						onLoad: 'check-sso',
+						checkLoginIframe: false
+					}).success(
+						function (authenticated) {
+							if (authenticated) {											
+								var siow = new SIOW( 
+									{ 
+										"connPath": "/synopticsdev/socket.io",
+										"accessToken": keycloak.token,
+										"queryString": document.location.search
+									}, 
+									function() { 
+										// window.location.reload(false); 
+										console.log("SIOW ERROR!");
+									} 
+								);
+								siow.start();	
+								var decodeToken = function(str) {
+									str = str.split('.')[1];
+									str = str.replace('/-/g', '+');
+									str = str.replace('/_/g', '/');
+									switch (str.length % 4) { case 0: break; case 2: str += '=='; break; case 3: str += '='; break; default: throw 'Invalid token'; }
+									str = (str + '===').slice(0, str.length + (str.length % 4));
+									str = str.replace(/-/g, '+').replace(/_/g, '/');
+									str = decodeURIComponent(escape(atob(str)));
+									str = JSON.parse(str);
+									return str;
+								};								
+								var updToken = setInterval(function(){									
+									try {
+										keycloak.updateToken(-1).success(function(response) {
+											siow.setToken(keycloak.token);
+										}).error(function(err) {
+											keycloak.login();
+										});
+									}
+									catch(rte) {
+										window.location.reload(false); 
+									}
+								},1000*( parseInt(decodeToken(keycloak.token)['exp']) - Math.ceil(new Date().getTime() / 1000) + keycloak.timeSkew ));																
+							} else {
+								keycloak.login();
+							}
+						}
+					).error(
+						function () {
+							keycloak.login();
+						}
+					);
+				};
+				xhr.send();				
+			});
+		</script>
+	</head>
+	<body></body>
+</html>
