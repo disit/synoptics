@@ -316,78 +316,252 @@ var listenBroker = function(topic) {
 							else if(obj["kpiId"]) {
 								var id = obj["kpiId"];
 								if(!kpis[id]) return;
-								kpis[id]["value"] = obj["value"];
-								kpis[id]["timestamp"] = obj["dataTime"];								
-								Object.keys(kpis[id]["subscriptions"]).forEach(function(socketid){
-									try {							
-										if(kpis[id]["subscriptions"][socketid]["isActive"] && kpis[id]["subscriptions"][socketid]["isAuthorized"]) {
-											var lastValue = kpis[id]["value"];
-											try { lastValue = JSON.parse(lastValue); } catch(me) {}
-											io.in(socketid).emit("update "+id, JSON.stringify({ 
-												event: "update "+id,
-												id: id, 
-												lastValue: lastValue, 
-												timestamp: kpis[id]["timestamp"]
-											}, (k, v) => v === undefined ? null : v)); 
-											if(config["verbose"]) {
-												console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
-												console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERED FOR "+id));
+								if(!obj["deleteTime"]) { // if the notification is about a new value									
+									if(obj["dataTime"] >= kpis[id]["timestamp"]) {
+										kpis[id]["value"] = obj["value"];
+										kpis[id]["timestamp"] = obj["dataTime"];								
+										Object.keys(kpis[id]["subscriptions"]).forEach(function(socketid){
+											try {							
+												if(kpis[id]["subscriptions"][socketid]["isActive"] && kpis[id]["subscriptions"][socketid]["isAuthorized"]) {
+													var lastValue = kpis[id]["value"];
+													try { lastValue = JSON.parse(lastValue); } catch(me) {}
+													io.in(socketid).emit("update "+id, JSON.stringify({ 
+														event: "update "+id,
+														id: id, 
+														lastValue: lastValue, 
+														timestamp: kpis[id]["timestamp"]
+													}, (k, v) => v === undefined ? null : v)); 
+													if(config["verbose"]) {
+														console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
+														console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERED FOR "+id));
+														console.log("Time: "+new Date().toString());
+														console.log("Socket: "+socketid);
+														if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
+														console.log({ 
+															event: "update "+id,
+															id: id, 
+															lastValue: kpis[id]["value"],  
+															timestamp: kpis[id]["timestamp"]
+														});
+														console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+													}
+												}
+											}
+											catch(e) {
+												console.log(">> UPDATE DELIVERY ERROR >>>>>>>>>>>>>>>>>");
+												console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERY ERROR FOR "+id));
 												console.log("Time: "+new Date().toString());
 												console.log("Socket: "+socketid);
 												if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
+												console.log("Error: it was not possible to deliver the below object to the above addressee");
 												console.log({ 
 													event: "update "+id,
 													id: id, 
-													lastValue: kpis[id]["value"],  
+													lastValue: kpis[id]["value"], 
 													timestamp: kpis[id]["timestamp"]
 												});
-												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+												console.log("The occurred exception follows: ");
+												console.log(e);
+												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+												return;
 											}
-										}
-									}
-									catch(e) {
-										console.log(">> UPDATE DELIVERY ERROR >>>>>>>>>>>>>>>>>");
-										console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERY ERROR FOR "+id));
-										console.log("Time: "+new Date().toString());
-										console.log("Socket: "+socketid);
-										if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
-										console.log("Error: it was not possible to deliver the below object to the above addressee");
-										console.log({ 
-											event: "update "+id,
-											id: id, 
-											lastValue: kpis[id]["value"], 
-											timestamp: kpis[id]["timestamp"]
 										});
-										console.log("The occurred exception follows: ");
-										console.log(e);
-										console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-										return;
+										ksbs[topic]["consumer"].commit(function(err, data) {
+											if(err) {
+												console.log(">> SOCKET SERVER -> KAFKA | COMMIT ERROR >>>>>>>>>>>>>>>>>");
+												console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT ERROR"));
+												console.log("Time: "+new Date().toString());
+												console.log("What happened: it was not possible to notify Kafka that the message has been consumed.");
+												console.log("Callback error:");
+												console.log(err);
+												console.log("Callback data:");
+												console.log(data);
+												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+												return;
+											}
+											else {
+												if(config["verbose"]) {
+													console.log(">> SOCKET SERVER -> KAFKA | COMMIT OK >>>>>>>>>>>>>>");
+													console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT OK"));
+													console.log("Time: "+new Date().toString());
+													console.log("What: Kafka has been correctly notified of the successful consumption of the following:");
+													console.log(data);
+													console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+												}
+											}
+										});		
 									}
-								});
-								ksbs[topic]["consumer"].commit(function(err, data) {
-									if(err) {
-										console.log(">> SOCKET SERVER -> KAFKA | COMMIT ERROR >>>>>>>>>>>>>>>>>");
-										console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT ERROR"));
-										console.log("Time: "+new Date().toString());
-										console.log("What happened: it was not possible to notify Kafka that the message has been consumed.");
-										console.log("Callback error:");
-										console.log(err);
-										console.log("Callback data:");
-										console.log(data);
-										console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-										return;
-									}
-									else {
+								}	
+								else { // if the notification is about a deleted value
+									if(kpis[id]["timestamp"] == obj["dataTime"]) { // ... and the deleted value is right the last one ...
 										if(config["verbose"]) {
-											console.log(">> SOCKET SERVER -> KAFKA | COMMIT OK >>>>>>>>>>>>>>");
-											console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT OK"));
+											console.log(">> MANAGING WITH VALUE DELETION NOTIFICATION FROM KAFKA >>");
 											console.log("Time: "+new Date().toString());
-											console.log("What: Kafka has been correctly notified of the successful consumption of the following:");
-											console.log(data);
-											console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+											console.log("Summary: "+logSummary(new Date(),"--","KAFKA NOTIFICATION RECEIVED OF DELETED KPI VALUE"));
+											console.log("The message received from Kafka indicates that the last value has been deleted from KPI "+id);
+											console.log("I am going to attempt grabbing the socket ID of a subscriber");
+											console.log("and make a read on her behalf to get the most recent value of the KPI after the deletion");								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");			
 										}
-									}
-								});								
+										// I request the new last value making a read on behalf of an active and authorized subscriber, if any
+										var gsocketid = null; 
+										Object.keys(kpis[id]["subscriptions"]).forEach(function(socketid){
+											if(kpis[id]["subscriptions"][socketid]["isActive"] && kpis[id]["subscriptions"][socketid]["isAuthorized"]) gsocketid = socketid;
+										});
+										if(gsocketid == null) return;
+										var chkUrlb = null;
+										if(tkns[gsocketid]) chkUrlb = config["getOneKpiValue"].format(id,tkns[gsocketid]["token"],sourceRequest,sourceId); 
+										else chkUrlb =  config["getOnePublicKpiValue"].format(id,sourceRequest,sourceId); 
+										var xmlHttpChkz = new XMLHttpRequest();
+										xmlHttpChkz.open( "GET", chkUrlb, true);
+										if(config["verbose"]) {
+											console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
+											console.log("Summary: "+logSummary(new Date(),gsocketid,"KPI API CALL"));
+											console.log("Time: "+new Date().toString());
+											console.log("Socket: "+gsocketid);
+											if(tkns[gsocketid]) console.log("User: "+tkns[gsocketid]["username"]);
+											console.log("URL: "+chkUrlb);
+											console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+										}
+										xmlHttpChkz.onreadystatechange = function() {	
+											try {
+												if(xmlHttpChkz.readyState < 4) return;
+												if(config["verbose"]) {
+													console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
+													console.log("Summary: "+logSummary(new Date(),gsocketid,"KPI API RESPONSE "+xmlHttpChkz.status));
+													console.log("Time: "+new Date().toString());
+													console.log("Socket: "+gsocketid);
+													if(tkns[gsocketid]) console.log("User: "+tkns[gsocketid]["username"]);
+													console.log("Status: "+xmlHttpChkz.status)
+													console.log(xmlHttpChkz.responseText);
+													console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+												}		
+												var isAuthorized = xmlHttpChkz.status == 200; 												
+												if(isAuthorized) { 
+													JSON.parse(xmlHttpChkz.responseText).forEach(function(xmlHttp4eValz) { 
+														kpis[id]["value"] = xmlHttp4eValz["value"]; 
+														kpis[id]["timestamp"] = xmlHttp4eValz["dataTime"]; 
+													});														
+													Object.keys(kpis[id]["subscriptions"]).forEach(function(socketid){
+														try {							
+															if(kpis[id]["subscriptions"][socketid]["isActive"] && kpis[id]["subscriptions"][socketid]["isAuthorized"]) {
+																var lastValue = kpis[id]["value"];
+																try { lastValue = JSON.parse(lastValue); } catch(me) {}
+																io.in(socketid).emit("update "+id, JSON.stringify({ 
+																	event: "update "+id,
+																	id: id, 
+																	lastValue: lastValue, 
+																	timestamp: kpis[id]["timestamp"]
+																}, (k, v) => v === undefined ? null : v)); 
+																if(config["verbose"]) {
+																	console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
+																	console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERED FOR "+id));
+																	console.log("Time: "+new Date().toString());
+																	console.log("Socket: "+socketid);
+																	if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
+																	console.log({ 
+																		event: "update "+id,
+																		id: id, 
+																		lastValue: kpis[id]["value"],  
+																		timestamp: kpis[id]["timestamp"]
+																	});
+																	console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+																}
+															}
+														}
+														catch(e) {
+															console.log(">> UPDATE DELIVERY ERROR >>>>>>>>>>>>>>>>>");
+															console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERY ERROR FOR "+id));
+															console.log("Time: "+new Date().toString());
+															console.log("Socket: "+socketid);
+															if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
+															console.log("Error: it was not possible to deliver the below object to the above addressee");
+															console.log({ 
+																event: "update "+id,
+																id: id, 
+																lastValue: kpis[id]["value"], 
+																timestamp: kpis[id]["timestamp"]
+															});
+															console.log("The occurred exception follows: ");
+															console.log(e);
+															console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+															return;
+														}
+													});
+													ksbs[topic]["consumer"].commit(function(err, data) {
+														if(err) {
+															console.log(">> SOCKET SERVER -> KAFKA | COMMIT ERROR >>>>>>>>>>>>>>>>>");
+															console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT ERROR"));
+															console.log("Time: "+new Date().toString());
+															console.log("What happened: it was not possible to notify Kafka that the message has been consumed.");
+															console.log("Callback error:");
+															console.log(err);
+															console.log("Callback data:");
+															console.log(data);
+															console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+															return;
+														}
+														else {
+															if(config["verbose"]) {
+																console.log(">> SOCKET SERVER -> KAFKA | COMMIT OK >>>>>>>>>>>>>>");
+																console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT OK"));
+																console.log("Time: "+new Date().toString());
+																console.log("What: Kafka has been correctly notified of the successful consumption of the following:");
+																console.log(data);
+																console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+															}
+														}
+													});	
+												}
+												else {
+													console.log(">> ERROR MANAGING WITH VALUE DELETION NOTIFICATION FROM KAFKA >>");
+													console.log("Time: "+new Date().toString());
+													console.log("Summary: "+logSummary(new Date(),"--","ERROR MANAGING KAFKA NOTIFICATION OF DELETED KPI VALUE"));
+													console.log((tkns[gsocketid]?tkns[gsocketid]["username"]:"An user")+" sem to be able to access the KPI "+id);
+													console.log("to get the new most recent value after deletion of the last value, but failed instead ("+xmlHttpChkz.status+").");
+													console.log("This server will provide an incorrect value for that KPI until a successfull read of it will be made by someone.");
+													console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");	
+												}
+
+											}
+											catch(e) {		
+												console.log(">> ERROR MANAGING WITH VALUE DELETION NOTIFICATION FROM KAFKA >>");
+												console.log("Time: "+new Date().toString());
+												console.log("Summary: "+logSummary(new Date(),"--","ERROR MANAGING KAFKA NOTIFICATION OF DELETED KPI VALUE"));
+												console.log("An exception occurred while trying to get the new most recent value of KPI "+id+" after deletion of its last value.");
+												console.log(e);
+												console.log("This server will provide an incorrect value for that KPI until a successfull read of it will be made by someone.");
+												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");								
+											}
+										};
+										xmlHttpChkz.send(null);
+									}	
+									else {
+										ksbs[topic]["consumer"].commit(function(err, data) {
+											if(err) {
+												console.log(">> SOCKET SERVER -> KAFKA | COMMIT ERROR >>>>>>>>>>>>>>>>>");
+												console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT ERROR"));
+												console.log("Time: "+new Date().toString());
+												console.log("What happened: it was not possible to notify Kafka that the message has been consumed.");
+												console.log("Callback error:");
+												console.log(err);
+												console.log("Callback data:");
+												console.log(data);
+												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+												return;
+											}
+											else {
+												if(config["verbose"]) {
+													console.log(">> SOCKET SERVER -> KAFKA | COMMIT OK >>>>>>>>>>>>>>");
+													console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT OK"));
+													console.log("Time: "+new Date().toString());
+													console.log("What: Kafka has been correctly notified of the successful consumption of the following:");
+													console.log(data);
+													console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+												}
+											}
+										});			
+									}										
+								}	
 							}
 						}
 						catch(e) {
@@ -1787,7 +1961,25 @@ io.on("connection", function(socket){
 				}
 				// We keep track that a request was submitted from this socket for this variable. It will be usefull for cleaning up everything at socket disconnect.
 				if(!clni[socket.id]) clni[socket.id] = [data]; else if(!clni[socket.id].includes(data)) clni[socket.id].push(data); 				
-				if(data.startsWith("shared_")) { // Then, if the requested variable is a shared variable
+				if(data.startsWith("const_")) {
+					io.in(socket.id).emit("read", JSON.stringify({ 
+						event: "read",
+						id: data,
+						lastValue: new Buffer(data.substr(6),"base64").toString("utf8"), 
+						timestamp: new Date().getTime()
+					}, (k, v) => v === undefined ? null : v)); 
+					if(config["verbose"]) {
+						console.log(">> READ OK >>>>>>>>>>>>>>");
+						console.log("Summary: "+logSummary(new Date(),socket.id,"READ OK FOR "+data));
+						console.log("Time: "+new Date().toString());
+						console.log("Socket: "+socket.id);
+						if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
+						console.log("Payload: "+data);
+						console.log("Response: "+new Buffer(data.substr(6),"base64").toString("utf8"));
+						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+					}
+				}
+				else if(data.startsWith("shared_")) { // Then, if the requested variable is a shared variable
 					if(shared[data]) {
 						var lastValue = shared[data]["value"];
 						try { lastValue = JSON.parse(lastValue); } catch(me) {}
@@ -2795,7 +2987,25 @@ io.on("connection", function(socket){
 					console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 				}
 				if(!clni[socket.id]) clni[socket.id] = [data]; else if(!clni[socket.id].includes(data)) clni[socket.id].push(data);  // track for cleaning on socket session close
-				if(data.startsWith("shared_")) { // if the subscription is for an shared variable
+				if(data.startsWith("const_")) {
+					io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 
+					io.in(socket.id).emit("update "+data, JSON.stringify({ 
+						event: "update "+data,
+						id: data,
+						lastValue: new Buffer(data.substr(6),"base64").toString("utf8"), 
+						timestamp: new Date().getTime()
+					}, (k, v) => v === undefined ? null : v)); 
+					if(config["verbose"]) {
+						console.log(">> SUBSCRIBE OK >>>>>>>>>>>>>>");
+						console.log("Summary: "+logSummary(new Date(),socket.id,"SUBSCRIBE OK FOR "+data));
+						console.log("Time: "+new Date().toString());
+						console.log("Socket: "+socket.id);
+						if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
+						console.log("For: "+data);
+						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+					}
+				}
+				else if(data.startsWith("shared_")) { // if the subscription is for an shared variable
 					if(!shared[data]) shared[data] = {}; // build empty in-memory copy of the variable to keep track of the subscription (values will arrive, maybe)
 					if(!shared[data]["subscriptions"]) shared[data]["subscriptions"] = [];
 					if(!shared[data]["subscriptions"].includes(socket.id)) { 
@@ -3432,7 +3642,19 @@ io.on("connection", function(socket){
 					console.log(data);
 					console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 				}
-				if(data.startsWith("shared_")) { // If the subscription to be canceled concerns a shared variable
+				if(data.startsWith("const_")) {
+					io.in(socket.id).emit("unsubscribe", JSON.stringify({event: "unsubscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));  
+					if(config["verbose"]) {
+						console.log(">> UNSUBSCRIBE OK >>>>>>>>>>>>");
+						console.log("Summary: "+logSummary(new Date(),socket.id,"UNSUBSCRIBE OK FOR "+data));
+						console.log("Time: "+new Date().toString());
+						console.log("Socket: "+socket.id);
+						if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
+						console.log("For: "+data);
+						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+					}
+				}
+				else if(data.startsWith("shared_")) { // If the subscription to be canceled concerns a shared variable
 					if(shared[data] && shared[data]["subscriptions"] && shared[data]["subscriptions"].includes(socket.id)) { // if a subscription actually exists of the requester for this variable
 						shared[data]["subscriptions"].splice(shared[data]["subscriptions"].indexOf(socket.id),1); // delete
 						io.in(socket.id).emit("unsubscribe", JSON.stringify({event: "unsubscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));  // and confirm
@@ -3730,7 +3952,17 @@ io.on("connection", function(socket){
 					io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
 					return;
 				}
-				if(data.startsWith("shared_")) {
+				if(data.startsWith("const_")) {
+					io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 					
+					console.log(">> CLEAR OK >>>>>>>>>>");
+					console.log("Summary: "+logSummary(new Date(),socket.id,"CLEAR OK FOR "+data));
+					console.log("Time: "+new Date().toString());
+					console.log("Socket: "+socket.id);
+					if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
+					console.log("Variable: "+data);
+					console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");		
+				}
+				else if(data.startsWith("shared_")) {
 					if(shared[data]) {
 						if(tkns[socket.id] && tkns[socket.id]["roles"] && tkns[socket.id]["roles"].includes("RootAdmin") ) {
 							delete shared[data];	
@@ -4309,13 +4541,54 @@ if(config["verbose"]) {
 	console.log("Non-mapped and shared variables are going to be loaded from the database");
 	console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 }
-var connection = mysql.createConnection({
+
+/* OLD WAY OF CONNECTING TO DATABASE, THAT DID NOT HANDLE DISCONNECTION DUE TO SERVER RESTART, IDLE, AND SO ON
+	var connection = mysql.createConnection({
+		host     : config["dbHost"],
+		user     : config["dbUser"],
+		password : config["dbPass"],
+		database : config["dbName"]
+	});
+	connection.connect(); 
+*/
+
+// >> NEW WAY OF CONNECTING TO DATABASE >>>>
+
+var db_config = {
 	host     : config["dbHost"],
 	user     : config["dbUser"],
 	password : config["dbPass"],
 	database : config["dbName"]
-});
-connection.connect();
+};
+
+var connection;
+	
+function handleDisconnect() {
+	
+	connection = mysql.createConnection(db_config); 			// Recreate the connection, since the old one cannot be reused.
+
+	connection.connect(function(err) { 							// The server is either down
+		if(err) { 												// or restarting (takes a while sometimes).
+			console.log('error when connecting to db:', err);
+			setTimeout(handleDisconnect, 2000); 				// We introduce a delay before attempting to reconnect,
+		}                                     					// to avoid a hot loop, and to allow our node script to
+	});                                     					// process asynchronous requests in the meantime.
+																// If you're also serving http, display a 503 error.
+	connection.on('error', function(err) {
+		console.log('db error', err);
+		if(err.code === 'PROTOCOL_CONNECTION_LOST') { 			// Connection to the MySQL server is usually
+			handleDisconnect();                         		// lost due to either server restart, or a
+		} else {                                      			// connnection idle timeout (the wait_timeout
+			throw err;       									// server variable configures this)
+		}														
+	});
+	
+}
+
+handleDisconnect();
+
+// <<<< NEW WAY OF CONNECTING TO DATABASE <<
+
 try {
 	var lastBkp = [];
 	connection.query(
@@ -4358,7 +4631,7 @@ try {
 						console.log("Non-mapped and shared variables have been successfully loaded from the database");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 					}
-					connection.query("delete from SynopticSrvVars where id not in ( "+lastBkp.join(",")+" ) ", function (error, results, fields) { 
+					if(lastBkp && lastBkp.length > 0) connection.query("delete from SynopticSrvVars where id not in ( "+lastBkp.join(",")+" ) ", function (error, results, fields) { 
 						if(error) {
 							console.log(">> DB ERROR >>>>>>>");
 							console.log("Summary: "+logSummary(new Date(),"--","DB DELETE ERROR IN BACKUP CLEANING AT STARTUP"));
@@ -4386,7 +4659,7 @@ try {
 												results.forEach(function(result){					
 													lstbkp.push(result["id"]);
 												});
-												connection.query("delete from SynopticSrvVars where id not in ( "+lstbkp.join(",")+" ) ", function (error, results, fields) { 
+												if(lstbkp && lstbkp.length > 0) connection.query("delete from SynopticSrvVars where id not in ( "+lstbkp.join(",")+" ) ", function (error, results, fields) { 
 													if(error) {
 														console.log(">> DB ERROR >>>>>>>");
 														console.log("Summary: "+logSummary(new Date(),"--","DB DELETE ERROR IN PERIODIC BACKUP CLEANING"));
