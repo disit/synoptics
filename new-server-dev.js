@@ -13,7 +13,6 @@
 	along with this program. If not, see <http://www.gnu.org/licenses/>. */
 
 var express = require('express');
-var express = require('express');
 var app = express();
 var http = require('http').createServer(app);
 var fs = require("fs");
@@ -1394,8 +1393,9 @@ io.on("connection", function(socket){
 																										console.log("Time: "+new Date().toString());
 																										console.log("Socket: "+socket.id);
 																										if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
-																										console.log("Payload: "+fkAuthData);
-																										console.log("Error: cannot get user info (invalid token?)");
+																										console.log("Access Token: "+fkAuthData);
+																										console.log("Access Token Retrieval Details: the access token has been retrieved sending an HTTP POST request to "+config["keycloakAuth"]+"realms/master/protocol/openid-connect/token"+" with the following body: "+"grant_type=password&username="+config["publicWriting"]["usr"]+"&password="+config["publicWriting"]["pwd"]+"&client_id="+config["publicWriting"]["cid"]);
+																										console.log("Error returned to the user: cannot get user info (invalid token?)");
 																										console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																										io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: fkAuthData, status:"ERROR",error:"cannot get user info (invalid token?)"}, (k, v) => v === undefined ? null : v)); 
 																										return;
@@ -1644,8 +1644,9 @@ io.on("connection", function(socket){
 																										console.log("Time: "+new Date().toString());
 																										console.log("Socket: "+socket.id);
 																										if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
-																										console.log("Payload: "+fkAuthData);
-																										console.log("Error: cannot get user info (invalid token?)");
+																										console.log("Access Token: "+fkAuthData);
+																										console.log("Access Token Retrieval Details: the access token has been retrieved sending a HTTP POST request to "+config["keycloakAuth"]+"realms/master/protocol/openid-connect/token"+" with the following body: "+"grant_type=password&username="+config["publicWriting"]["usr"]+"&password="+config["publicWriting"]["pwd"]+"&client_id="+config["publicWriting"]["cid"]);
+																										console.log("Error returned to the user: cannot get user info (invalid token?)");
 																										console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																										io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: fkAuthData, status:"ERROR",error:"cannot get user info (invalid token?)"}, (k, v) => v === undefined ? null : v)); 
 																										return;
@@ -1908,8 +1909,8 @@ io.on("connection", function(socket){
 							console.log("Time: "+new Date().toString());
 							console.log("Socket: "+socket.id);
 							if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
-							console.log("Payload: "+data);
-							console.log("Error: cannot get user info (invalid token?)");
+							console.log("Access Token: "+data);
+							console.log("Error: cannot get user info. The client has sent an \"authenticate\" socket.io event, attaching \""+data+"\" as the payload (access token). The error message returned to the client is \"cannot get user info (invalid token?)\".");
 							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 							io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: data, status:"ERROR",error:"cannot get user info (invalid token?)"}, (k, v) => v === undefined ? null : v)); 
 							return;
@@ -2022,7 +2023,7 @@ io.on("connection", function(socket){
 					}
 				}
 				else if(data.startsWith("s4csvg_")) {	// else if the requested variable is a non-mapped variable
-					if(syns[socket.id]["loading"]) {
+					if(syns[socket.id] && syns[socket.id]["loading"]) {
 						console.log(">> READ ERROR >>>>>>>>>>>>>>>>>");
 						console.log("Summary: "+logSummary(new Date(),socket.id,"READ ERROR "+data));
 						console.log("Time: "+new Date().toString());
@@ -2581,7 +2582,7 @@ io.on("connection", function(socket){
 					}					
 				}
 				else if((dataObj["id"]+"").startsWith("s4csvg_")) { // if the variable to be written is a non-mapped variable					
-					if(syns[socket.id]["loading"]) {
+					if(syns[socket.id] && syns[socket.id]["loading"]) {
 						console.log(">> WRITE ERROR >>>>>>>>>>>>>>>>>");
 						console.log("Summary: "+logSummary(new Date(),socket.id,"WRITE ERROR"));
 						console.log("Time: "+new Date().toString());
@@ -2912,7 +2913,7 @@ io.on("connection", function(socket){
 								console.log("Response body:");
 								console.log(xmlHttpw999.responseText);
 								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-								if(!(kpis[obj.id] && kpis[obj.id]["editors"] && kpis[obj.id]["editors"].includes(tkns[socket.id]["username"]))) { // do not notify client about write error unless it is the first time that the user attempted writing the variable, in which case it could be important to return an error because it could due to unauthorized
+								if(!(kpis[obj.id] && kpis[obj.id]["editors"] && kpis[obj.id]["editors"].includes(tkns[socket.id]["username"]) && xmlHttpw999.status != 401 )) { // do not notify client about write error unless it is the first time that the user attempted writing the variable, in which case it could be important to return an error because it could due to unauthorized
 									io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"ERROR",error:xmlHttpw999.status}, (k, v) => v === undefined ? null : v)); 
 								}
 							}
@@ -3067,7 +3068,7 @@ io.on("connection", function(socket){
 					}
 				}
 				else if(data.startsWith("s4csvg_")) { // if the subscription is for a non-mapped variable
-					if(syns[socket.id]["loading"]) {
+					if(syns[socket.id] && syns[socket.id]["loading"]) {
 						console.log(">> SUBSCRIBE ERROR >>>>>>>>>>>>>>>>>");
 						console.log("Summary: "+logSummary(new Date(),socket.id,"SUBSCRIBE ERROR FOR "+data));
 						console.log("Time: "+new Date().toString());
@@ -3681,7 +3682,7 @@ io.on("connection", function(socket){
 					}							
 				}
 				else if(data.startsWith("s4csvg_")) { // If the subscription to be canceled concerns a non-mapped variable
-					if(syns[socket.id]["loading"]) {
+					if(syns[socket.id] && syns[socket.id]["loading"]) {
 						console.log(">> UNSUBSCRIBE ERROR >>>>>>>>>>>>>>>>>");
 						console.log("Summary: "+logSummary(new Date(),socket.id,"UNSUBSCRIBE ERROR FOR "+data));
 						console.log("Time: "+new Date().toString());
@@ -4036,7 +4037,7 @@ io.on("connection", function(socket){
 					}
 				}
 				else if(data.startsWith("s4csvg_")) {
-					if(syns[socket.id]["loading"]) {
+					if(syns[socket.id] && syns[socket.id]["loading"]) {
 						console.log(">> CLEAR ERROR >>>>>>>>>>>>>>>>>");
 						console.log("Summary: "+logSummary(new Date(),socket.id,"CLEAR ERROR FOR "+data));
 						console.log("Time: "+new Date().toString());
@@ -4575,12 +4576,10 @@ function handleDisconnect() {
 	});                                     					// process asynchronous requests in the meantime.
 																// If you're also serving http, display a 503 error.
 	connection.on('error', function(err) {
-		console.log('db error', err);
-		if(err.code === 'PROTOCOL_CONNECTION_LOST') { 			// Connection to the MySQL server is usually
-			handleDisconnect();                         		// lost due to either server restart, or a
-		} else {                                      			// connnection idle timeout (the wait_timeout
-			throw err;       									// server variable configures this)
-		}														
+		console.log('db error', err);								// Connection to the MySQL server is usually
+		if(err.code === 'PROTOCOL_CONNECTION_LOST' || err.fatal) { 	// lost due to either server restart, or a
+			handleDisconnect();                         			// connnection idle timeout (the wait_timeout
+		} 															// server variable configures this)									
 	});
 	
 }
