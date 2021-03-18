@@ -23,11 +23,41 @@ var https = require('https').createServer(credentials,app);
 var io = require('socket.io')(https);
 var mysql = require('mysql');
 var XMLHttpRequest = require("xmlhttprequest").XMLHttpRequest;
-var kafka = require('kafka-node');
+const { Kafka, logLevel } = require('kafkajs');
 var xmlparser = require('fast-xml-parser');
 eval(fs.readFileSync('new-config.js')+'');
 var sourceRequest = config["srvSrcReq"];
-var sourceId = config["srvSrcReq"];		
+var sourceId = config["srvSrcReq"];	
+const kafkaClient = new Kafka({ clientId: sourceRequest, brokers: [config["kafka"]["endpoint"]], logLevel: config["verbose"]?logLevel.INFO:logLevel.ERROR }); 
+
+var bench_in = function(ctx,lbl){
+	if(config["benchmark"]["enabled"]) {
+		if(Object.keys(bench["curr"]).length > config["benchmark"]["currSize"]) { // if there's a problem: try flushing, free mem, stop
+			fs.writeFile(config["benchmark"]["outPath"].format(""+(new Date().getTime())+".bench.curr"),JSON.stringify(bench["curr"]),function(err){bench["curr"]={};});
+			config["benchmark"]["enabled"] = false;
+			return null;
+		}
+		else { // if everything is OK, add new entry
+			var benchID = (""+(new Date().getTime())+ctx+lbl.substring(0,100)).replace(" ","");
+			bench["curr"][benchID] = [(new Date().getTime()),ctx,lbl,null];			
+			return benchID;
+		}
+	}
+};
+
+var bench_out = function(id){	
+	if(config["benchmark"]["enabled"]) {
+		if(id in bench["curr"]) { // move to done, and if mem limit is reached, flush
+			bench["done"][id] = JSON.parse(JSON.stringify(bench["curr"][id])); bench["done"][id][3] = (new Date().getTime()); delete bench["curr"][id];
+			if(Object.keys(bench["done"]).length > config["benchmark"]["doneSize"]) {
+				fs.writeFile(config["benchmark"]["outPath"].format(""+(new Date().getTime())+".bench"),JSON.stringify(bench["done"]),function(err){
+					if(!err) bench["done"]={};
+					else config["benchmark"]["enabled"] = false;				
+				});
+			}
+		}
+	}
+};
 
 String.prototype.format = function() {
 	a = this;
@@ -67,7 +97,7 @@ var logSummary = function(dt,skt,txt) {
 	}
 };
 
-var notifyBroker = function(obj,socketid){ // this function is called for delivering to Kafka updates of variable values, as a result of a write event that a client has raised on this socket server
+var notifyBroker = async function(obj,socketid) { // this function is called for delivering to Kafka updates of variable values, as a result of a write event that a client has raised on this socket server
 		
 	if(config["verbose"]) {		
 		console.log(">> SOCKET SERVER -> KAFKA | CONNECTING... >>>>>>>");
@@ -78,247 +108,225 @@ var notifyBroker = function(obj,socketid){ // this function is called for delive
 		console.log("Connecting to Kafka broker at "+config["kafka"]["endpoint"]);
 		console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 	}
-	var client = new kafka.KafkaClient({ kafkaHost: config["kafka"]["endpoint"] });
-	var Producer = kafka.Producer;
-	var producer = new Producer(client, {requireAcks: 1});
-	producer.on('ready', function () {
-		if(config["verbose"]) {
-			console.log(">> SOCKET SERVER -> KAFKA | CREATING TOPIC... >>>>>>>");
-			console.log("Summary: "+logSummary(new Date(),socketid,"SOCKET SERVER TO KAFKA CREATING TOPIC "+obj.event.toKafkaTopic()));
-			console.log("Time: "+new Date().toString());
-			console.log("Socket: "+socketid);
-			if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
-			console.log("Creating topic "+obj.event.toKafkaTopic());
-			console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-		}
-		producer.createTopics([obj.event.toKafkaTopic()], true, function (errToCreateTopic, topicCreated) {
-			if (!errToCreateTopic) {
-				if(config["verbose"]) {
-					console.log(">> SOCKET SERVER -> KAFKA | SENDING MESSAGE... >>>>>>>");
-					console.log("Summary: "+logSummary(new Date(),socketid,"SOCKET SERVER TO KAFKA SENDING MESSAGE TO TOPIC "+obj.event.toKafkaTopic()));
-					console.log("Time: "+new Date().toString());
-					console.log("Socket: "+socketid);
-					if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
-					console.log("On this topic: "+obj.event.toKafkaTopic());
-					console.log("Sending this message:");
-					console.log(JSON.stringify(obj));
-					console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-				}					
-				producer.send([{
-					topic: obj.event.toKafkaTopic(), partition: 0, messages: [JSON.stringify(obj)], attributes: 0
-				}], function (err, result) {
-					if (err) {
-						console.log(">> SOCKET SERVER -> KAFKA | ERROR >>>>>>>");
-						console.log("Summary: "+logSummary(new Date(),socketid,"SOCKET SERVER TO KAFKA ERROR SENDING MESSAGE"));
-						console.log("Time: "+new Date().toString());
-						console.log("Socket: "+socketid);
-						if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
-						console.log("Attempted sending this:");
-						console.log(obj);
-						console.log("with this topic:");
-						console.log(obj.event.toKafkaTopic());
-						console.log("Obtained this error:");
-						console.log(err);
-						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-					}
-					else {
-						if(config["verbose"]) {
-							console.log(">> SOCKET SERVER -> KAFKA | SEND OK >>>>>>>");
-							console.log("Summary: "+logSummary(new Date(),socketid,"SOCKET SERVER TO KAFKA SEND OK TO TOPIC "+obj.event.toKafkaTopic()));
-							console.log("Time: "+new Date().toString());
-							console.log("Socket: "+socketid);
-							if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
-							console.log("Successfully sent this:");
-							console.log(obj);
-							console.log("with this topic:");
-							console.log(obj.event.toKafkaTopic());
-							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-						}
-					}	
-				});
-			} else {
-				console.log(">> SOCKET SERVER -> KAFKA | ERROR >>>>>>>");
-				console.log("Summary: "+logSummary(new Date(),socketid,"SOCKET SERVER TO KAFKA ERROR COULD NOT TO CREATE TOPIC "+obj.event.toKafkaTopic()));
-				console.log("Time: "+new Date().toString());
-				console.log("Socket: "+socketid);
-				if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
-				console.log("Attempted sending this:");
-				console.log(obj);
-				console.log("with this topic:");
-				console.log(obj.event.toKafkaTopic());
-				console.log("Error:");
-				console.log("It was not possible to create topic \""+obj.event+"\", the socket server says.");
-				console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");                
-			}
-		});        
-	});
-
-	producer.on('error', function (err) {
-		console.log(">> SOCKET SERVER -> KAFKA | ERROR >>>>>>>");
-		console.log("Summary: "+logSummary(new Date(),socketid,"SOCKET SERVER TO KAFKA ERROR SENDING MESSAGE"));
+	
+	try { producer.benchID = bench_in(benchID,"KAFKA connect producer"); } catch(bk) {}
+	const producer = kafkaClient.producer(); 
+	await producer.connect(); 
+	try { bench_out(producer.benchID); } catch(bk) {}
+	
+	if(config["verbose"]) {
+		console.log(">> SOCKET SERVER -> KAFKA | SENDING MESSAGE... >>>>>>>");
+		console.log("Summary: "+logSummary(new Date(),socketid,"SOCKET SERVER TO KAFKA SENDING MESSAGE TO TOPIC "+obj.event.toKafkaTopic()));
 		console.log("Time: "+new Date().toString());
 		console.log("Socket: "+socketid);
 		if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
-		console.log("Attempted sending this:");
-		console.log(obj);
-		console.log("with this topic:");
-		console.log(obj.event.toKafkaTopic());
-		console.log("Obtained this error:");
-		console.log(err);
-		console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-	});
+		console.log("On this topic: "+obj.event.toKafkaTopic());
+		console.log("Sending this message:");
+		console.log(JSON.stringify(obj));
+		console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+	}	
+	
+	try { producer.benchID = bench_in(benchID,"KAFKA send to topic "+obj.event.toKafkaTopic()); } catch(bk) {}
+	await producer.send({ topic: obj.event.toKafkaTopic(), messages: [JSON.stringify(obj)],	});
+	try { bench_out(producer.benchID); } catch(bk) {}
+	
+	await producer.disconnect()
 	
 }
 
-var listenBroker = function(topic) {
-	try { 
-		topic = topic.toKafkaTopic();
-		if( ( !ksbs[topic] ) || ksbs[topic]["error"] ) {
-			ksbs[topic] = {};
-			if(config["verbose"]) {
-				console.log(">> SOCKET SERVER -> KAFKA | CONNECTING... >>>>>>>");				
-				console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA CONNECTING TO "+config["kafka"]["endpoint"]));
-				console.log("Time: "+new Date().toString());
-				console.log("Connecting to Kafka broker at "+config["kafka"]["endpoint"]);
-				console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-			}
-			ksbs[topic]["client"] = new kafka.KafkaClient({ kafkaHost: config["kafka"]["endpoint"] });
-			
-			var Offset = kafka.Offset;
-			var offset = new Offset(ksbs[topic]["client"]);
-			offset.fetchLatestOffsets([topic], (err, data) => {
-				try {
-					var startFrom = null;
-					if(err || !data[topic]){
-						console.log(">> SOCKET SERVER -> KAFKA | OFFSET ERROR >>>>>>>");
-						console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA ERROR COULD NOT GET OFFSET FOR TOPIC "+topic));
-						console.log("Time: "+new Date().toString());
-						console.log("Failed to get offsets of topic: " + topic + "; " + err);
-						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+
+var kafkaConsumers = {};
+var listenBroker = async function(newtopic) {
+	newtopic = newtopic.toKafkaTopic();
+	if(!kafkaConsumers[newtopic]) {
+		kafkaConsumers[newtopic] = kafkaClient.consumer({ groupId: newtopic+(new Date().getUTCMilliseconds()) });
+		try { kafkaConsumers[newtopic].benchID = bench_in(benchID,"KAFKA connect consumer"); } catch(bk) {}
+		await kafkaConsumers[newtopic].connect();
+		try { bench_out(kafkaConsumers[newtopic].benchID); } catch(bk) {}		
+		try { kafkaConsumers[newtopic].benchID = bench_in(benchID,"KAFKA subscribe to topic "+newtopic); } catch(bk) {}
+		await kafkaConsumers[newtopic].subscribe({ topic: newtopic });
+		try { bench_out(kafkaConsumers[newtopic].benchID); } catch(bk) {}		
+		await kafkaConsumers[newtopic].run({
+		  eachMessage: async ({ topic, partition, message }) => {
+			var topic = message["topic"];
+			var localBenchID = null; try { localBenchID = bench_in("NO CONTEXT","KAFKA incoming message about "+topic); } catch(bk) {}
+			try {					
+				if(config["verbose"]) {
+					console.log(">> KAFKA -> SOCKET SERVER | RECEIVED MESSAGE >>>>>>>");
+					console.log("Summary: "+logSummary(new Date(),"--","KAFKA TO SOCKET SERVER RECEIVED MESSAGE"));
+					console.log("Time: "+new Date().toString());
+					console.log("Message: ");
+					console.log(message);
+					console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+				}
+				var obj = JSON.parse(message["value"]);
+				if(obj["serviceUri"]) {
+					var id = obj["serviceUri"]+" "+obj["value_name"];
+					if(!sens[id]) {
+						sens[id] = { 
+							id: id,
+							value: obj.value?obj.value:obj.value_str?obj.value_str:JSON.stringify(obj.value_obj), 
+							timestamp: new Date(obj.date_time).getTime(), 
+							subscriptions: {}
+						}; 
 					}
-					else { 			
-						startFrom = data[topic]["0"];
-						if(config["verbose"]) {
-							console.log(">> SOCKET SERVER -> KAFKA | OFFSET >>>>>>>");
-							console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA CURRENT OFFSET IS "+startFrom+" FOR TOPIC "+topic));
-							console.log("Time: "+new Date().toString());
-							console.log("Last offset for topic " + topic + " is "+startFrom);
-							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-						}
+					else {
+						sens[id]["value"] = obj.value?obj.value:obj.value_str?obj.value_str:JSON.stringify(obj.value_obj);
+						sens[id]["timestamp"] = new Date(obj.date_time).getTime();
 					}
-					var Consumer = kafka.Consumer;
-					if(config["verbose"]) {
-						console.log(">> SOCKET SERVER -> KAFKA | SUBSCRIPTION >>>>>>>");
-						console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA SUBSCRIBING TO "+topic));
-						console.log("Time: "+new Date().toString());
-						console.log("Message: I am now going to subscribe for "+topic);
-						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-					}
-					if(startFrom) ksbs[topic]["consumer"] = new Consumer( ksbs[topic]["client"], [ { topic: topic, offset: startFrom } ], { autoCommit: false, fromOffset: true } );
-					else ksbs[topic]["consumer"] = new Consumer( ksbs[topic]["client"], [ { topic: topic } ], { autoCommit: false } );
-					ksbs[topic]["consumer"].on('message', function (message) {
-						try {					
-							if(config["verbose"]) {
-								console.log(">> KAFKA -> SOCKET SERVER | RECEIVED MESSAGE >>>>>>>");
-								console.log("Summary: "+logSummary(new Date(),"--","KAFKA TO SOCKET SERVER RECEIVED MESSAGE"));
-								console.log("Time: "+new Date().toString());
-								console.log("Message: ");
-								console.log(message);
-								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+					Object.keys(sens[id]["subscriptions"]).forEach(function(socketid){
+						try {							
+							if(sens[id]["subscriptions"][socketid]["isActive"] && sens[id]["subscriptions"][socketid]["isAuthorized"]) {
+								var lastValue = sens[id]["value"];
+								try { lastValue = JSON.parse(lastValue); } catch(me) {}
+								io.in(socketid).emit("update "+id, JSON.stringify({ 
+									event: "update "+id,
+									id: id, 
+									lastValue: lastValue, 
+									timestamp: sens[id]["timestamp"]
+								}, (k, v) => v === undefined ? null : v)); 
+								if(config["verbose"]) {
+									console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
+									console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERED FOR "+id));
+									console.log("Time: "+new Date().toString());
+									console.log("Socket: "+socketid);
+									if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
+									console.log({ 
+										event: "update "+id,
+										id: id, 
+										lastValue: sens[id]["value"],  
+										timestamp: sens[id]["timestamp"]
+									});
+									console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+								}
 							}
-							var obj = JSON.parse(message["value"]);
-							if(obj["serviceUri"]) {
-								var id = obj["serviceUri"]+" "+obj["value_name"];
-								if(!sens[id]) {
-									sens[id] = { 
-										id: id,
-										value: obj.value?obj.value:obj.value_str?obj.value_str:JSON.stringify(obj.value_obj), 
-										timestamp: new Date(obj.date_time).getTime(), 
-										subscriptions: {}
-									}; 
-								}
-								else {
-									sens[id]["value"] = obj.value?obj.value:obj.value_str?obj.value_str:JSON.stringify(obj.value_obj);
-									sens[id]["timestamp"] = new Date(obj.date_time).getTime();
-								}
-								Object.keys(sens[id]["subscriptions"]).forEach(function(socketid){
-									try {							
-										if(sens[id]["subscriptions"][socketid]["isActive"] && sens[id]["subscriptions"][socketid]["isAuthorized"]) {
-											var lastValue = sens[id]["value"];
-											try { lastValue = JSON.parse(lastValue); } catch(me) {}
-											io.in(socketid).emit("update "+id, JSON.stringify({ 
-												event: "update "+id,
-												id: id, 
-												lastValue: lastValue, 
-												timestamp: sens[id]["timestamp"]
-											}, (k, v) => v === undefined ? null : v)); 
-											if(config["verbose"]) {
-												console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
-												console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERED FOR "+id));
-												console.log("Time: "+new Date().toString());
-												console.log("Socket: "+socketid);
-												if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
-												console.log({ 
-													event: "update "+id,
-													id: id, 
-													lastValue: sens[id]["value"],  
-													timestamp: sens[id]["timestamp"]
-												});
-												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-											}
-										}
-									}
-									catch(e) {
-										console.log(">> UPDATE DELIVERY ERROR >>>>>>>>>>>>>>>>>");
-										console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERY ERROR FOR "+id));
-										console.log("Time: "+new Date().toString());
-										console.log("Socket: "+socketid);
-										if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
-										console.log("Error: it was not possible to deliver the below object to the above addressee");
-										console.log({ 
+						}
+						catch(e) {
+							console.log(">> UPDATE DELIVERY ERROR >>>>>>>>>>>>>>>>>");
+							console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERY ERROR FOR "+id));
+							console.log("Time: "+new Date().toString());
+							console.log("Socket: "+socketid);
+							if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
+							console.log("Error: it was not possible to deliver the below object to the above addressee");
+							console.log({ 
+								event: "update "+id,
+								id: id, 
+								lastValue: sens[id]["value"], 
+								timestamp: sens[id]["timestamp"]
+							});
+							console.log("The occurred exception follows: ");
+							console.log(e);
+							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+							return;
+						}
+					});
+				}
+				else if(obj["kpiId"]) {
+					var id = obj["kpiId"];
+					if(!kpis[id]) return;
+					if(!obj["deleteTime"]) { // if the notification is about a new value									
+						if(obj["dataTime"] >= kpis[id]["timestamp"]) {
+							kpis[id]["value"] = obj["value"];
+							kpis[id]["timestamp"] = obj["dataTime"];								
+							Object.keys(kpis[id]["subscriptions"]).forEach(function(socketid){
+								try {							
+									if(kpis[id]["subscriptions"][socketid]["isActive"] && kpis[id]["subscriptions"][socketid]["isAuthorized"]) {
+										var lastValue = kpis[id]["value"];
+										try { lastValue = JSON.parse(lastValue); } catch(me) {}
+										io.in(socketid).emit("update "+id, JSON.stringify({ 
 											event: "update "+id,
 											id: id, 
-											lastValue: sens[id]["value"], 
-											timestamp: sens[id]["timestamp"]
-										});
-										console.log("The occurred exception follows: ");
-										console.log(e);
-										console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-										return;
-									}
-								});
-								ksbs[topic]["consumer"].commit(function(err, data) {
-									if(err) {
-										console.log(">> SOCKET SERVER -> KAFKA | COMMIT ERROR >>>>>>>>>>>>>>>>>");
-										console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT ERROR"));
-										console.log("Time: "+new Date().toString());
-										console.log("What happened: it was not possible to notify Kafka that the message has been consumed.");
-										console.log("Callback error:");
-										console.log(err);
-										console.log("Callback data:");
-										console.log(data);
-										console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-										return;
-									}
-									else {
+											lastValue: lastValue, 
+											timestamp: kpis[id]["timestamp"]
+										}, (k, v) => v === undefined ? null : v)); 
 										if(config["verbose"]) {
-											console.log(">> SOCKET SERVER -> KAFKA | COMMIT OK >>>>>>>>>>>>>>");
-											console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT OK"));
+											console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
+											console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERED FOR "+id));
 											console.log("Time: "+new Date().toString());
-											console.log("What: Kafka has been correctly notified of the successful consumption of the following:");
-											console.log(data);
+											console.log("Socket: "+socketid);
+											if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
+											console.log({ 
+												event: "update "+id,
+												id: id, 
+												lastValue: kpis[id]["value"],  
+												timestamp: kpis[id]["timestamp"]
+											});
 											console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 										}
 									}
-								});
+								}
+								catch(e) {
+									console.log(">> UPDATE DELIVERY ERROR >>>>>>>>>>>>>>>>>");
+									console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERY ERROR FOR "+id));
+									console.log("Time: "+new Date().toString());
+									console.log("Socket: "+socketid);
+									if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
+									console.log("Error: it was not possible to deliver the below object to the above addressee");
+									console.log({ 
+										event: "update "+id,
+										id: id, 
+										lastValue: kpis[id]["value"], 
+										timestamp: kpis[id]["timestamp"]
+									});
+									console.log("The occurred exception follows: ");
+									console.log(e);
+									console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+									return;
+								}
+							});
+						}
+					}	
+					else { // if the notification is about a deleted value
+						if(kpis[id]["timestamp"] == obj["dataTime"]) { // ... and the deleted value is right the last one ...
+							if(config["verbose"]) {
+								console.log(">> MANAGING WITH VALUE DELETION NOTIFICATION FROM KAFKA >>");
+								console.log("Time: "+new Date().toString());
+								console.log("Summary: "+logSummary(new Date(),"--","KAFKA NOTIFICATION RECEIVED OF DELETED KPI VALUE"));
+								console.log("The message received from Kafka indicates that the last value has been deleted from KPI "+id);
+								console.log("I am going to attempt grabbing the socket ID of a subscriber");
+								console.log("and make a read on her behalf to get the most recent value of the KPI after the deletion");								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");			
 							}
-							else if(obj["kpiId"]) {
-								var id = obj["kpiId"];
-								if(!kpis[id]) return;
-								if(!obj["deleteTime"]) { // if the notification is about a new value									
-									if(obj["dataTime"] >= kpis[id]["timestamp"]) {
-										kpis[id]["value"] = obj["value"];
-										kpis[id]["timestamp"] = obj["dataTime"];								
+							// I request the new last value making a read on behalf of an active and authorized subscriber, if any
+							var gsocketid = null; 
+							Object.keys(kpis[id]["subscriptions"]).forEach(function(socketid){
+								if(kpis[id]["subscriptions"][socketid]["isActive"] && kpis[id]["subscriptions"][socketid]["isAuthorized"]) gsocketid = socketid;
+							});
+							if(gsocketid == null) return;
+							var chkUrlb = null;
+							if(tkns[gsocketid]) chkUrlb = config["getOneKpiValue"].format(id,tkns[gsocketid]["token"],sourceRequest,sourceId); 
+							else chkUrlb =  config["getOnePublicKpiValue"].format(id,sourceRequest,sourceId); 
+							var xmlHttpChkz = new XMLHttpRequest();
+							xmlHttpChkz.open( "GET", chkUrlb, true); 
+							try { xmlHttpChkz.bctx = localBenchID; xmlHttpChkz.blbl = "GET "+chkUrlb; } catch(ba) {}
+							if(config["verbose"]) {
+								console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
+								console.log("Summary: "+logSummary(new Date(),gsocketid,"KPI API CALL"));
+								console.log("Time: "+new Date().toString());
+								console.log("Socket: "+gsocketid);
+								if(tkns[gsocketid]) console.log("User: "+tkns[gsocketid]["username"]);
+								console.log("URL: "+chkUrlb);
+								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+							}
+							xmlHttpChkz.onreadystatechange = function() {	
+								try {
+									if(xmlHttpChkz.readyState < 4) return;
+									try { bench_out(this.benchID); } catch(ba) {}
+									if(config["verbose"]) {
+										console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
+										console.log("Summary: "+logSummary(new Date(),gsocketid,"KPI API RESPONSE "+xmlHttpChkz.status));
+										console.log("Time: "+new Date().toString());
+										console.log("Socket: "+gsocketid);
+										if(tkns[gsocketid]) console.log("User: "+tkns[gsocketid]["username"]);
+										console.log("Status: "+xmlHttpChkz.status)
+										console.log(xmlHttpChkz.responseText);
+										console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+									}		
+									var isAuthorized = xmlHttpChkz.status == 200; 												
+									if(isAuthorized) { 
+										JSON.parse(xmlHttpChkz.responseText).forEach(function(xmlHttp4eValz) { 
+											kpis[id]["value"] = xmlHttp4eValz["value"]; 
+											kpis[id]["timestamp"] = xmlHttp4eValz["dataTime"]; 
+										});														
 										Object.keys(kpis[id]["subscriptions"]).forEach(function(socketid){
 											try {							
 												if(kpis[id]["subscriptions"][socketid]["isActive"] && kpis[id]["subscriptions"][socketid]["isAuthorized"]) {
@@ -365,437 +373,291 @@ var listenBroker = function(topic) {
 												return;
 											}
 										});
-										ksbs[topic]["consumer"].commit(function(err, data) {
-											if(err) {
-												console.log(">> SOCKET SERVER -> KAFKA | COMMIT ERROR >>>>>>>>>>>>>>>>>");
-												console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT ERROR"));
-												console.log("Time: "+new Date().toString());
-												console.log("What happened: it was not possible to notify Kafka that the message has been consumed.");
-												console.log("Callback error:");
-												console.log(err);
-												console.log("Callback data:");
-												console.log(data);
-												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-												return;
-											}
-											else {
-												if(config["verbose"]) {
-													console.log(">> SOCKET SERVER -> KAFKA | COMMIT OK >>>>>>>>>>>>>>");
-													console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT OK"));
-													console.log("Time: "+new Date().toString());
-													console.log("What: Kafka has been correctly notified of the successful consumption of the following:");
-													console.log(data);
-													console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-												}
-											}
-										});		
 									}
-								}	
-								else { // if the notification is about a deleted value
-									if(kpis[id]["timestamp"] == obj["dataTime"]) { // ... and the deleted value is right the last one ...
-										if(config["verbose"]) {
-											console.log(">> MANAGING WITH VALUE DELETION NOTIFICATION FROM KAFKA >>");
-											console.log("Time: "+new Date().toString());
-											console.log("Summary: "+logSummary(new Date(),"--","KAFKA NOTIFICATION RECEIVED OF DELETED KPI VALUE"));
-											console.log("The message received from Kafka indicates that the last value has been deleted from KPI "+id);
-											console.log("I am going to attempt grabbing the socket ID of a subscriber");
-											console.log("and make a read on her behalf to get the most recent value of the KPI after the deletion");								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");			
-										}
-										// I request the new last value making a read on behalf of an active and authorized subscriber, if any
-										var gsocketid = null; 
-										Object.keys(kpis[id]["subscriptions"]).forEach(function(socketid){
-											if(kpis[id]["subscriptions"][socketid]["isActive"] && kpis[id]["subscriptions"][socketid]["isAuthorized"]) gsocketid = socketid;
-										});
-										if(gsocketid == null) return;
-										var chkUrlb = null;
-										if(tkns[gsocketid]) chkUrlb = config["getOneKpiValue"].format(id,tkns[gsocketid]["token"],sourceRequest,sourceId); 
-										else chkUrlb =  config["getOnePublicKpiValue"].format(id,sourceRequest,sourceId); 
-										var xmlHttpChkz = new XMLHttpRequest();
-										xmlHttpChkz.open( "GET", chkUrlb, true);
-										if(config["verbose"]) {
-											console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
-											console.log("Summary: "+logSummary(new Date(),gsocketid,"KPI API CALL"));
-											console.log("Time: "+new Date().toString());
-											console.log("Socket: "+gsocketid);
-											if(tkns[gsocketid]) console.log("User: "+tkns[gsocketid]["username"]);
-											console.log("URL: "+chkUrlb);
-											console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-										}
-										xmlHttpChkz.onreadystatechange = function() {	
-											try {
-												if(xmlHttpChkz.readyState < 4) return;
-												if(config["verbose"]) {
-													console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
-													console.log("Summary: "+logSummary(new Date(),gsocketid,"KPI API RESPONSE "+xmlHttpChkz.status));
-													console.log("Time: "+new Date().toString());
-													console.log("Socket: "+gsocketid);
-													if(tkns[gsocketid]) console.log("User: "+tkns[gsocketid]["username"]);
-													console.log("Status: "+xmlHttpChkz.status)
-													console.log(xmlHttpChkz.responseText);
-													console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-												}		
-												var isAuthorized = xmlHttpChkz.status == 200; 												
-												if(isAuthorized) { 
-													JSON.parse(xmlHttpChkz.responseText).forEach(function(xmlHttp4eValz) { 
-														kpis[id]["value"] = xmlHttp4eValz["value"]; 
-														kpis[id]["timestamp"] = xmlHttp4eValz["dataTime"]; 
-													});														
-													Object.keys(kpis[id]["subscriptions"]).forEach(function(socketid){
-														try {							
-															if(kpis[id]["subscriptions"][socketid]["isActive"] && kpis[id]["subscriptions"][socketid]["isAuthorized"]) {
-																var lastValue = kpis[id]["value"];
-																try { lastValue = JSON.parse(lastValue); } catch(me) {}
-																io.in(socketid).emit("update "+id, JSON.stringify({ 
-																	event: "update "+id,
-																	id: id, 
-																	lastValue: lastValue, 
-																	timestamp: kpis[id]["timestamp"]
-																}, (k, v) => v === undefined ? null : v)); 
-																if(config["verbose"]) {
-																	console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
-																	console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERED FOR "+id));
-																	console.log("Time: "+new Date().toString());
-																	console.log("Socket: "+socketid);
-																	if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
-																	console.log({ 
-																		event: "update "+id,
-																		id: id, 
-																		lastValue: kpis[id]["value"],  
-																		timestamp: kpis[id]["timestamp"]
-																	});
-																	console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-																}
-															}
-														}
-														catch(e) {
-															console.log(">> UPDATE DELIVERY ERROR >>>>>>>>>>>>>>>>>");
-															console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERY ERROR FOR "+id));
-															console.log("Time: "+new Date().toString());
-															console.log("Socket: "+socketid);
-															if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
-															console.log("Error: it was not possible to deliver the below object to the above addressee");
-															console.log({ 
-																event: "update "+id,
-																id: id, 
-																lastValue: kpis[id]["value"], 
-																timestamp: kpis[id]["timestamp"]
-															});
-															console.log("The occurred exception follows: ");
-															console.log(e);
-															console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-															return;
-														}
-													});
-													ksbs[topic]["consumer"].commit(function(err, data) {
-														if(err) {
-															console.log(">> SOCKET SERVER -> KAFKA | COMMIT ERROR >>>>>>>>>>>>>>>>>");
-															console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT ERROR"));
-															console.log("Time: "+new Date().toString());
-															console.log("What happened: it was not possible to notify Kafka that the message has been consumed.");
-															console.log("Callback error:");
-															console.log(err);
-															console.log("Callback data:");
-															console.log(data);
-															console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-															return;
-														}
-														else {
-															if(config["verbose"]) {
-																console.log(">> SOCKET SERVER -> KAFKA | COMMIT OK >>>>>>>>>>>>>>");
-																console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT OK"));
-																console.log("Time: "+new Date().toString());
-																console.log("What: Kafka has been correctly notified of the successful consumption of the following:");
-																console.log(data);
-																console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-															}
-														}
-													});	
-												}
-												else {
-													console.log(">> ERROR MANAGING WITH VALUE DELETION NOTIFICATION FROM KAFKA >>");
-													console.log("Time: "+new Date().toString());
-													console.log("Summary: "+logSummary(new Date(),"--","ERROR MANAGING KAFKA NOTIFICATION OF DELETED KPI VALUE"));
-													console.log((tkns[gsocketid]?tkns[gsocketid]["username"]:"An user")+" sem to be able to access the KPI "+id);
-													console.log("to get the new most recent value after deletion of the last value, but failed instead ("+xmlHttpChkz.status+").");
-													console.log("This server will provide an incorrect value for that KPI until a successfull read of it will be made by someone.");
-													console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");	
-												}
-
-											}
-											catch(e) {		
-												console.log(">> ERROR MANAGING WITH VALUE DELETION NOTIFICATION FROM KAFKA >>");
-												console.log("Time: "+new Date().toString());
-												console.log("Summary: "+logSummary(new Date(),"--","ERROR MANAGING KAFKA NOTIFICATION OF DELETED KPI VALUE"));
-												console.log("An exception occurred while trying to get the new most recent value of KPI "+id+" after deletion of its last value.");
-												console.log(e);
-												console.log("This server will provide an incorrect value for that KPI until a successfull read of it will be made by someone.");
-												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");								
-											}
-										};
-										xmlHttpChkz.send(null);
-									}	
 									else {
-										ksbs[topic]["consumer"].commit(function(err, data) {
-											if(err) {
-												console.log(">> SOCKET SERVER -> KAFKA | COMMIT ERROR >>>>>>>>>>>>>>>>>");
-												console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT ERROR"));
-												console.log("Time: "+new Date().toString());
-												console.log("What happened: it was not possible to notify Kafka that the message has been consumed.");
-												console.log("Callback error:");
-												console.log(err);
-												console.log("Callback data:");
-												console.log(data);
-												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-												return;
-											}
-											else {
-												if(config["verbose"]) {
-													console.log(">> SOCKET SERVER -> KAFKA | COMMIT OK >>>>>>>>>>>>>>");
-													console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA COMMIT OK"));
-													console.log("Time: "+new Date().toString());
-													console.log("What: Kafka has been correctly notified of the successful consumption of the following:");
-													console.log(data);
-													console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-												}
-											}
-										});			
-									}										
-								}	
-							}
-						}
-						catch(e) {
-							console.log(">> KAFKA -> SOCKET SERVER | ERROR >>>>>>>>>>>>>>>>>");
-							console.log("Summary: "+logSummary(new Date(),"--","KAFKA TO SOCKET SERVER ERROR"));
-							console.log("Time: "+new Date().toString());
-							console.log("Error: something wrong happened while consuming message from Kafka.");
-							console.log("Exception object:");
-							console.log(e);
-							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-							return;
-						}				
-					});		
-					ksbs[topic]["consumer"].on('error', function (err) {
-						console.log(">> KAFKA -> SOCKET SERVER | ERROR >>>>>>>>>>>>>>>>>");
-						console.log("Summary: "+logSummary(new Date(),"--","KAFKA TO SOCKET SERVER ERROR"));
-						console.log("Time: "+new Date().toString());
-						console.log("Error:");
-						console.log(err);
-						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");						
-						try {
-							if('The topic(s) '+topic+' do not exist' == err["message"]) {
-								var c = new kafka.KafkaClient({ kafkaHost: config["kafka"]["endpoint"] });
-								var P = kafka.Producer;
-								var p = new P(c, {requireAcks: 1});
-								p.on('ready', function () {
-									try {
-										p.createTopics([topic], true, function (errToCreateTopic, topicCreated) {
-											try {
-												if(!errToCreateTopic) {
-													console.log(">> KAFKA -> SOCKET SERVER | ERROR HANDLED SUCCESSFULLY >>>>>>>>>>>>>>>>>");
-													console.log("Summary: "+logSummary(new Date(),"--","KAFKA TO SOCKET SERVER RESUMED FROM ERROR CREATING TOPIC "+topic));
-													console.log("Time: "+new Date().toString());
-													console.log("The new topic "+topic+" was successfully created.");
-													console.log("I am now going to subscribe to the topic");
-													console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-													ksbs[topic]["error"] = true;
-													listenBroker(topic);
-												}
-												else {
-													console.log(">> KAFKA -> SOCKET SERVER | ERROR >>>>>>>>>>>>>>>>>");
-													console.log("Summary: "+logSummary(new Date(),"--","KAFKA TO SOCKET SERVER COULD NOT RESUME FROM ERROR CREATING TOPIC "+topic));
-													console.log("Time: "+new Date().toString());
-													console.log("... and the attempt of creating the topic "+topic+" failed.");
-													console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-												}
-											}
-											catch(e) {
-												console.log(">> KAFKA -> SOCKET SERVER | EXCEPTION >>>>>>>>>>>>>>>>>");
-												console.log("Summary: "+logSummary(new Date(),"--","KAFKA TO SOCKET SERVER COULD NOT RESUME FROM ERROR CREATING TOPIC "+topic));
-												console.log("Time: "+new Date().toString());
-												console.log("... and the attempt of creating the topic "+topic+" failed due to the following exception:");
-												console.log(e);
-												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-											}
-										});
-									}
-									catch(e) {
-										console.log(">> KAFKA -> SOCKET SERVER | EXCEPTION >>>>>>>>>>>>>>>>>");
-										console.log("Summary: "+logSummary(new Date(),"--","KAFKA TO SOCKET SERVER COULD NOT RESUME FROM ERROR CREATING TOPIC "+topic));
+										console.log(">> ERROR MANAGING WITH VALUE DELETION NOTIFICATION FROM KAFKA >>");
 										console.log("Time: "+new Date().toString());
-										console.log("... and the attempt of creating the topic "+topic+" failed due to the following exception:");
-										console.log(e);
-										console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+										console.log("Summary: "+logSummary(new Date(),"--","ERROR MANAGING KAFKA NOTIFICATION OF DELETED KPI VALUE"));
+										console.log((tkns[gsocketid]?tkns[gsocketid]["username"]:"An user")+" sem to be able to access the KPI "+id);
+										console.log("to get the new most recent value after deletion of the last value, but failed instead ("+xmlHttpChkz.status+").");
+										console.log("This server will provide an incorrect value for that KPI until a successfull read of it will be made by someone.");
+										console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");	
 									}
-								});
+
+								}
+								catch(e) {		
+									console.log(">> ERROR MANAGING WITH VALUE DELETION NOTIFICATION FROM KAFKA >>");
+									console.log("Time: "+new Date().toString());
+									console.log("Summary: "+logSummary(new Date(),"--","ERROR MANAGING KAFKA NOTIFICATION OF DELETED KPI VALUE"));
+									console.log("An exception occurred while trying to get the new most recent value of KPI "+id+" after deletion of its last value.");
+									console.log(e);
+									console.log("This server will provide an incorrect value for that KPI until a successfull read of it will be made by someone.");
+									console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");								
+								}
+							};
+							try { xmlHttpChkz.benchID = bench_in(xmlHttpChkz.bctx,xmlHttpChkz.blbl); } catch(ba) {}
+							xmlHttpChkz.send(null);
+						}											
+					}	
+				}
+				else if(obj["id"]) {
+					if((obj["id"]+"").startsWith("shared_")) {		
+						// build/refresh the in-memory shared variable (remember shared variables exist nowhere else than in socket server memory though)
+						if(!shared[obj.id]) shared[obj.id] = {};
+						shared[obj.id] = { id: obj["id"], value: obj["value"], timestamp: new Date().getTime(), subscriptions: shared[obj["id"]]["subscriptions"]?shared[obj["id"]]["subscriptions"]:[] };
+						// deliver new value to all sockets subscribed for this variable
+						shared[obj.id]["subscriptions"].forEach(function(socketid){ 
+							try {							
+								var lastValue = shared[obj.id]["value"];
+								try { lastValue = JSON.parse(lastValue); } catch(me) {}
+								io.in(socketid).emit("update "+shared[obj.id]["id"], JSON.stringify({ 
+									event: "update "+shared[obj.id]["id"],
+									id: shared[obj.id]["id"], 
+									lastValue: lastValue, 
+									timestamp: shared[obj.id]["timestamp"]
+								}, (k, v) => v === undefined ? null : v)); 
+
+								if(config["verbose"]) {
+									console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
+									console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERED FOR "+shared[obj.id]["id"]));
+									console.log("Time: "+new Date().toString());
+									console.log("Socket: "+socketid);
+									if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
+									console.log({ 
+										event: "update "+shared[obj.id]["id"],
+										id: shared[obj.id]["id"], 
+										lastValue: shared[obj.id]["value"], 
+										timestamp: shared[obj.id]["timestamp"]
+									});
+									console.log("<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+								}
 							}
+							catch(e) {
+								console.log(">> UPDATE DELIVERY ERROR >>>>>>>>>>>>>>>>>");
+								console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERY ERROR FOR "+shared[obj.id]["id"]));
+								console.log("Time: "+new Date().toString());
+								console.log("Socket: "+socketid);
+								if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
+								console.log("Error: it was not possible to deliver the below object to the above addressee");
+								console.log({ 
+									event: "update "+shared[obj.id]["id"],
+									id: shared[obj.id]["id"], 
+									lastValue: shared[obj.id]["value"], 
+									timestamp: shared[obj.id]["timestamp"]
+								});
+								console.log("The occurred exception follows: ");
+								console.log(e);
+								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+							}
+						});
+
+						try { // Store on DB for recovery purposes						
+							connection.query(
+								'insert into SynopticSrvVars(name,value,type,timestamp) values (?,?,?,?)', 
+								[ obj["id"], obj["value"], typeof obj["value"], shared[obj["id"]]["timestamp"] ],
+								function (error, results) { 
+									try { 
+										if (error) { 									
+											console.log(">> DB ERROR >>>>>>>");
+											console.log("Summary: "+logSummary(new Date(),"NO SOCKET. FROM KAFKA.","DB INSERT SYNOPTICSRVVARS ERROR FOR "+obj["id"]));
+											console.log("Time: "+new Date().toString());														
+											console.log("Could not store the following variable value in MySQL database:");
+											console.log(shared[obj["id"]]);
+											console.log("due to the following error:");
+											console.log(error);
+											console.log("<<<<<<<<<<<<<<<<<<<\n\n");
+										}
+										else if(config["verbose"]) {
+											console.log(">> DB BACKUP OK >>>>>>>");
+											console.log("Summary: "+logSummary(new Date(),"NO SOCKET. FROM KAFKA.","DB INSERT SYNOPTICSRVVARS OK FOR "+obj["id"]));
+											console.log("Time: "+new Date().toString());																												
+											console.log("Successfully stored the following variable value:");
+											console.log(shared[obj["id"]]);
+											console.log("in MySQL database for recovery purposes.");
+											console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");
+										}
+									} catch(e){
+										console.log(">> BACKUP ERROR >>>>>>>");
+										console.log("Summary: "+logSummary(new Date(),"NO SOCKET. FROM KAFKA.","BACKUP ERROR FOR "+obj["id"]));
+										console.log("Time: "+new Date().toString());																										
+										console.log("Could not store the following variable value in MySQL database:");
+										console.log(shared[obj["id"]]);
+										console.log("due to the following exception:");
+										console.log(e);
+										console.log("<<<<<<<<<<<<<<<<<<<\n\n");
+									} 
+								}
+							);		
 						}
-						catch(e) {
-							console.log(">> KAFKA -> SOCKET SERVER | EXCEPTION >>>>>>>>>>>>>>>>>");
-							console.log("Summary: "+logSummary(new Date(),"--","KAFKA TO SOCKET SERVER COULD NOT RESUME FROM ERROR CREATING TOPIC "+topic));
+						catch(dbe) {
+							console.log(">> BACKUP ERROR >>>>>>>");
+							console.log("Summary: "+logSummary(new Date(),"NO SOCKET. FROM KAFKA.","BACKUP ERROR FOR "+obj["id"]));
+							console.log("Time: "+new Date().toString());										
+							console.log("Could not store the following variable value in MySQL database:");
+							console.log(shared[obj["id"]]);
+							console.log("due to the following exception:");
+							console.log(dbe);
+							console.log("<<<<<<<<<<<<<<<<<<<\n\n");
+						}																		
+						if(config["verbose"]) {
+							console.log(">> WRITE OK >>>>>>>>>>>>>>>>>>>>");
+							console.log("Summary: "+logSummary(new Date(),"NO SOCKET. FROM KAFKA.","WRITE OK FOR "+obj.id));
 							console.log("Time: "+new Date().toString());
-							console.log("... and the attempt of creating the topic "+topic+" failed due to the following exception:");
-							console.log(e);
-							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+							console.log(shared[obj.id]);
+							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+						}					
+					}
+					else if((obj["id"]+"").startsWith("s4csvg_")) { // if the variable to be written is a non-mapped variable					
+						if(!(obj["synoptic"] && obj["synoptic"]["mappings"] && obj["synoptic"]["mappings"]["output"] && obj["synoptic"]["mappings"]["output"][obj["id"]]) && !(obj["synoptic"] && obj["synoptic"]["mappings"] && obj["synoptic"]["mappings"]["input"] && obj["synoptic"]["mappings"]["input"][obj["id"]])) { // if the variable does not exist in current synoptic
+							console.log(">> WRITE ERROR >>>>>>>>>>>>>>>>>");
+							console.log("Summary: "+logSummary(new Date(),"NO SOCKET. FROM KAFKA.","WRITE ERROR"));
+							console.log("Time: "+new Date().toString());
+							console.log("Synoptic: "+(obj["synoptic"]?obj["synoptic"]["synoptic"]:"null"));
+							console.log("Payload: "+obj);
+							console.log("Error: Non-mapped variable not found in current synoptic, maybe a typo in variable name?");
+							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");										
+							return;
+						}					
+						// build/refresh the in-memory non-mapped variable (remember non-mapped variables exist nowhere else than in socket server memory though)
+						if(!vars[obj.id]) vars[obj.id] = {};
+						vars[obj.id][obj["synoptic"]["synoptic"]] = { id: obj["id"], value: obj["value"], synoptic: obj["synoptic"]["synoptic"], timestamp: new Date().getTime(), subscriptions: vars[obj["id"]][obj["synoptic"]["synoptic"]]?vars[obj["id"]][obj["synoptic"]["synoptic"]]["subscriptions"]:[]};
+						// deliver new value to all sockets subscribed for this variable
+						vars[obj.id][obj["synoptic"]["synoptic"]]["subscriptions"].forEach(function(socketid){ 
+							try {							
+								var lastValue = vars[obj.id][obj["synoptic"]["synoptic"]]["value"];
+								try { lastValue = JSON.parse(lastValue); } catch(me) {}
+								io.in(socketid).emit("update "+vars[obj.id][obj["synoptic"]["synoptic"]]["id"], JSON.stringify({ 
+									event: "update "+vars[obj.id][obj["synoptic"]["synoptic"]]["id"],
+									id: vars[obj.id][obj["synoptic"]["synoptic"]]["id"], 
+									lastValue: lastValue, 
+									synoptic: obj["synoptic"]["synoptic"], 
+									timestamp: vars[obj.id][obj["synoptic"]["synoptic"]]["timestamp"]
+								}, (k, v) => v === undefined ? null : v)); 
+								if(config["verbose"]) {
+									console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
+									console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERED FOR "+obj.id+" OF "+obj["synoptic"]["synoptic"]));
+									console.log("Time: "+new Date().toString());
+									console.log("Socket: "+socketid);
+									if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
+									console.log({ 
+										event: "update "+vars[obj.id][obj["synoptic"]["synoptic"]]["id"],
+										id: vars[obj.id][obj["synoptic"]["synoptic"]]["id"], 
+										lastValue: vars[obj.id][obj["synoptic"]["synoptic"]]["value"], 
+										synoptic: obj["synoptic"]["synoptic"], 
+										timestamp: vars[obj.id][obj["synoptic"]["synoptic"]]["timestamp"] 
+									});
+									console.log("<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+								}
+							}
+							catch(e) {
+								console.log(">> UPDATE DELIVERY ERROR >>>>>>>>>>>>>>>>>");
+								console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERY ERROR FOR "+obj.id+" OF "+obj["synoptic"]["synoptic"]));
+								console.log("Time: "+new Date().toString());
+								console.log("Socket: "+socketid);
+								if(tkns[socketid]) console.log("User: "+tkns[socketid]["username"]);
+								console.log("Error: it was not possible to deliver the below object to the above addressee");
+								console.log({ 
+									event: "update "+obj,
+									id: vars[obj.id][obj["synoptic"]["synoptic"]]["id"], 
+									lastValue: vars[obj.id][obj["synoptic"]["synoptic"]]["value"], 
+									synoptic: obj["synoptic"]["synoptic"], 
+									timestamp: vars[obj.id][obj["synoptic"]["synoptic"]]["timestamp"] 
+								});
+								console.log("The occurred exception follows: ");
+								console.log(e);
+								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+							}
+						});									
+						try { // Store on DB for recovery purposes
+							connection.query(
+								'insert into SynopticSrvVars(name,value,type,synoptic,timestamp) values (?,?,?,?,?)', 
+								[ 
+									vars[obj.id][obj["synoptic"]["synoptic"]]["id"], 
+									vars[obj.id][obj["synoptic"]["synoptic"]]["value"], 
+									typeof vars[obj.id][obj["synoptic"]["synoptic"]]["value"], 
+									obj["synoptic"]["synoptic"],
+									vars[obj.id][obj["synoptic"]["synoptic"]]["timestamp"]
+								], 
+								function (error, results) { 
+									try { 
+										if (error) { 									
+											console.log(">> DB ERROR >>>>>>>");
+											console.log("Summary: "+logSummary(new Date(),"NO SOCKET. FROM KAFKA.","DB INSERT ERROR FOR "+obj.id+" OF "+obj["synoptic"]["synoptic"]));
+											console.log("Time: "+new Date().toString());
+											console.log("Synoptic: "+obj["synoptic"]["synoptic"]);
+											console.log("Could not store the following variable value in MySQL database:");
+											console.log(vars[obj.id][obj["synoptic"]["synoptic"]]);
+											console.log("due to the following error:");
+											console.log(error);
+											console.log("<<<<<<<<<<<<<<<<<<<\n\n");
+										}
+										else if(config["verbose"]) {
+											console.log(">> DB BACKUP OK >>>>>>>");
+											console.log("Summary: "+logSummary(new Date(),"NO SOCKET. FROM KAFKA.","DB INSERT OK FOR "+obj.id+" OF "+obj["synoptic"]["synoptic"]));
+											console.log("Time: "+new Date().toString());
+											console.log("Synoptic: "+obj["synoptic"]["synoptic"]);
+											console.log("Successfully stored the following variable value:");
+											console.log(vars[obj.id][obj["synoptic"]["synoptic"]]);
+											console.log("in MySQL database for recovery purposes.");
+											console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");
+										}
+									} catch(e){
+										console.log(">> BACKUP ERROR >>>>>>>");
+										console.log("Summary: "+logSummary(new Date(),"NO SOCKET. FROM KAFKA.","BACKUP ERROR FOR "+obj.id+" OF "+obj["synoptic"]["synoptic"]));
+										console.log("Time: "+new Date().toString());
+										if(obj["synoptic"]) console.log("Synoptic: "+obj["synoptic"]["synoptic"]);
+										console.log("Could not store the following variable value in MySQL database:");
+										console.log(vars[obj.id][obj["synoptic"]["synoptic"]]);
+										console.log("due to the following exception:");
+										console.log(e);
+										console.log("<<<<<<<<<<<<<<<<<<<\n\n");
+									} 
+								}
+							);		
 						}
-						return;
-					});	
-				
+						catch(dbe) {
+							console.log(">> BACKUP ERROR >>>>>>>");
+							console.log("Summary: "+logSummary(new Date(),"NO SOCKET. FROM KAFKA.","BACKUP ERROR FOR "+obj.id+" OF "+obj["synoptic"]["synoptic"]));
+							console.log("Time: "+new Date().toString());
+							console.log("Synoptic: "+obj["synoptic"]["synoptic"]);
+							console.log("Could not store the following variable value in MySQL database:");
+							console.log(vars[obj.id][obj["synoptic"]["synoptic"]]);
+							console.log("due to the following exception:");
+							console.log(dbe);
+							console.log("<<<<<<<<<<<<<<<<<<<\n\n");						
+						}
+						//										
+						if(config["verbose"]) {
+							console.log(">> WRITE OK >>>>>>>>>>>>>>>>>>>>");
+							console.log("Summary: "+logSummary(new Date(),"NO SOCKET. FROM KAFKA.","WRITE OK FOR "+obj.id+" OF "+(obj["synoptic"]?obj["synoptic"]["synoptic"]:"null")));
+							console.log("Time: "+new Date().toString());										
+							console.log("Synoptic: "+(obj["synoptic"]?obj["synoptic"]["synoptic"]:"null"));
+							console.log(vars[obj.id][obj["synoptic"]["synoptic"]]);
+							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+						}
+					}
+
 				}
-				catch(e) {
-					console.log(">> SOCKET SERVER -> KAFKA | ERROR >>>>>>>");
-					console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA ERROR"));
-					console.log("Time: "+new Date().toString());
-					console.log(e);
-					console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-					return;
-				}
-				
-			});
-			
-		}
-	}
-	catch(e) {
-		console.log(">> SOCKET SERVER <-> KAFKA | ERROR >>>>>>>");
-		console.log("Summary: "+logSummary(new Date(),"--","SOCKET SERVER TO KAFKA ERROR"));
-		console.log("Time: "+new Date().toString());
-		console.log(e);
-		console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-		return;
-	}
-	
+				try { bench_out(localBenchID); } catch(bk) {}	
+			}
+			catch(e) {
+				console.log(">> KAFKA -> SOCKET SERVER | ERROR >>>>>>>>>>>>>>>>>");
+				console.log("Summary: "+logSummary(new Date(),"--","KAFKA TO SOCKET SERVER ERROR"));
+				console.log("Time: "+new Date().toString());
+				console.log("Error: something wrong happened while consuming message from Kafka.");
+				console.log("Exception object:");
+				console.log(e);
+				console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+				return;
+			}
+		  },
+		});
+	}	
 }
 
 app.use("/", express.static(__dirname ));
 
-app.get('/v2/synoptic/', function (req, res) {  
-  res.send(`<!DOCTYPE html>
-<html>
-	<head>
-		<title>Synoptic</title>
-		<script src="/synoptics/socket.io/socket.io.js"></script>
-		<script src="https://code.jquery.com/jquery-1.11.1.js"></script>
-		<script src="https://www.snap4city.org/mypersonaldata/js/lib/keycloak.js"></script>
-		<script src="../jsonpath-0.8.0.js"></script>
-		<script src="../socket.io.worker.js"></script>
-		<script src="../zoomHandler.js"></script>
-		<script>				
-			var doSecure = function() {
-				var siow = null;
-				var kk = null;
-				var xhr = new XMLHttpRequest();
-				xhr.open('GET', '../new-config.js', true);
-				xhr.onload = function() {
-					eval(xhr.response);
-					kk = Keycloak({
-						"realm": "master",
-						"url": config["keycloakAuth"],
-						"clientId": "js-synoptic-client"						
-					});
-					kk.init({
-						onLoad: 'check-sso',
-						checkLoginIframe: false
-					}).success(
-						function (authenticated) {
-							if (authenticated) {											
-									siow = new SIOW( 
-										{ 
-											"connPath": "/synoptics/socket.io",
-											"accessToken": kk.token,
-											"queryString": "?id={0}{1}"
-										}, 
-										function() { 
-											console.log("SIOW ERROR!");
-										} 
-									);
-									siow.start();	
-									var decodeToken = function(str) {
-										str = str.split('.')[1];
-										str = str.replace('/-/g', '+');
-										str = str.replace('/_/g', '/');
-										switch (str.length % 4) { case 0: break; case 2: str += '=='; break; case 3: str += '='; break; default: throw 'Invalid token'; }
-										str = (str + '===').slice(0, str.length + (str.length % 4));
-										str = str.replace(/-/g, '+').replace(/_/g, '/');
-										str = decodeURIComponent(escape(atob(str)));
-										str = JSON.parse(str);
-										return str;
-									};								
-									var updToken = setInterval(function(){									
-										try {
-											kk.updateToken(-1).success(function(response) {
-												siow.setToken(kk.token);
-											}).error(function(err) {
-												setTimeout(function(){  window.location.href = "?id={2}{3}"; }, 2000*Math.random() );
-											});
-										}
-										catch(rte) {
-											setTimeout(function(){  window.location.href = "?id={4}{5}"; }, 2000*Math.random() );
-										}
-									},1000*( parseInt(decodeToken(kk.token)['exp']) - Math.ceil(new Date().getTime() / 1000) + kk.timeSkew ));
-								
-							} else {
-								kk.login();
-							}
-						}
-					).error(
-						function () {
-							setTimeout(function(){ window.location.href = "?id={6}{7}"; }, 2000*Math.random() );
-						}
-					);
-				};
-				xhr.send();				
-			};		
-			$(function() {			
-				var siow = null;
-				var xhre = new XMLHttpRequest();
-				xhre.open('GET', '../new-config.js', true);
-				xhre.onload = function() {
-					eval(xhre.response);
-					var iddasboard = null;
-					if(document.referrer) document.referrer.replace(/[?&]+([^=&]+)=([^&]*)/gi, function(m,key,value) { if(key == "iddasboard") iddasboard = window.atob(value); });
-					if(iddasboard) {
-						var xhr = new XMLHttpRequest();
-						`.format(req.query.id,req.query.logLevel?"&logLevel="+req.query.logLevel:"",
-			req.query.id,req.query.logLevel?"&logLevel="+req.query.logLevel:"",
-			req.query.id,req.query.logLevel?"&logLevel="+req.query.logLevel:"",
-			req.query.id,req.query.logLevel?"&logLevel="+req.query.logLevel:"",
-			req.query.id,req.query.logLevel?"&logLevel="+req.query.logLevel:"")+
-			'xhr.open("GET", config["getDashboardData"].replace("{0}",iddasboard), true);'+
-						`
-						xhr.onload = function() { 
-							if(JSON.parse(xhr.response).visibility == "public") {
-								siow = new SIOW( 
-									{ 
-										"connPath": "/synoptics/socket.io", 
-										"queryString": "?id={0}{1}"
-									}, 
-									function(){doSecure();} 
-								).start();
-							}
-							else {
-								doSecure();
-							}
-						};
-						xhr.send();
-					}
-					else {
-						siow = new SIOW( 
-							{ 
-								"connPath": "/synoptics/socket.io", 
-								"queryString": "?id={2}{3}"
-							}, 
-							function(){doSecure();} 
-						).start();	
-					}
-				};
-				xhre.send();				
-			}); 
-			
-		</script>
-	</head>
-	<body></body>
-</html>`.format(req.query.id,req.query.logLevel?"&logLevel="+req.query.logLevel:"",
-			req.query.id,req.query.logLevel?"&logLevel="+req.query.logLevel:""));
-});
+eval(fs.readFileSync('new-server-dev-html.js')+'');
 
 var vars = {};
 var sens = {};
@@ -805,6 +667,7 @@ var syns = {};
 var clni = {};
 var ksbs = {};
 var shared = {};
+var bench = { "curr": {}, "done": {} };
 
 io.on("connection", function(socket){ 		
 		
@@ -821,7 +684,8 @@ io.on("connection", function(socket){
 			console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 		}
 		
-		socket.on("display", function(data) { // it provides back synoptic metadata so that the client could actually build and display the synoptic			
+		socket.on("display", function(data) { // it provides back synoptic metadata so that the client could actually build and display the synoptic						
+			var benchID = null; try { benchID = bench_in(socket.id,"display"); } catch(be) {}
 			syns[socket.id] = { loading: true };
 			try {							
 				if(config["verbose"]) {
@@ -839,6 +703,7 @@ io.on("connection", function(socket){
 				// We then check in first if this synoptic-specific SVG file is available. 
 				var xmlHttpTpl = new XMLHttpRequest();
 				xmlHttpTpl.open( "GET", config["synSvg"].format(data), true); 
+				try { xmlHttpTpl.bctx = benchID; xmlHttpTpl.blbl = "GET "+config["synSvg"].format(data); } catch(ba) {}
 				if(config["verbose"]) {
 					console.log(">> HTTP REQUEST >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 					console.log("Summary: "+logSummary(new Date(),socket.id,"HTTP REQUEST SYNOPTIC-SPECIFIC TEMPLATE FOR SYNOPTIC "+data));
@@ -851,6 +716,7 @@ io.on("connection", function(socket){
 				xmlHttpTpl.onreadystatechange = function() {	
 					try {
 						if(xmlHttpTpl.readyState < 4) return;
+						try { bench_out(this.benchID); } catch(ba) {}
 						if(config["verbose"]) {
 							console.log(">> HTTP RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 							console.log("Summary: "+logSummary(new Date(),socket.id,"HTTP RESPONSE "+xmlHttpTpl.status+" TO REQUEST SYNOPTIC-SPECIFIC TEMPLATE"));
@@ -899,6 +765,7 @@ io.on("connection", function(socket){
 											console.log("Error: nor the synoptic-specific SVG neither the generic path to the SVG template could be located for this synoptic");
 											console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 											io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:"Nor the synoptic-specific SVG neither the generic path to the SVG template could be located for this synoptic."}, (k, v) => v === undefined ? null : v)); 
+											try { bench_out(benchID); } catch(be) {}
 											socket.disconnect();
 											return;
 										}
@@ -929,6 +796,7 @@ io.on("connection", function(socket){
 													console.log(error);
 													console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 													io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:"Database error"}, (k, v) => v === undefined ? null : v)); 
+													try { bench_out(benchID); } catch(be) {}
 													socket.disconnect();
 													return;
 												}
@@ -940,6 +808,7 @@ io.on("connection", function(socket){
 													// we check to see if she is the owner of the synoptic
 													var xmlHttpAuth11 = new XMLHttpRequest();
 													xmlHttpAuth11.open( "GET", config["ownershipApi"].format(config["synOwnElmtType"],tkns[socket.id]["token"],data), true);
+													try { xmlHttpAuth11.bctx = benchID; xmlHttpAuth11.blbl = "GET "+config["ownershipApi"].format(config["synOwnElmtType"],tkns[socket.id]["token"],data); } catch(ba) {}
 													if(config["verbose"]) {
 														console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 														console.log("Summary: "+logSummary(new Date(),socket.id,"OWNERSHIP API CALL FOR "+data));
@@ -952,6 +821,7 @@ io.on("connection", function(socket){
 													xmlHttpAuth11.onreadystatechange = function() {							
 														try {
 															if(xmlHttpAuth11.readyState < 4) return;
+															try { bench_out(this.benchID); } catch(ba) {}
 															if(config["verbose"]) {
 																console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 																console.log("Summary: "+logSummary(new Date(),socket.id,"OWNERSHIP API RESPONSE "+xmlHttpAuth11.status));
@@ -970,6 +840,7 @@ io.on("connection", function(socket){
 																		if(ownElmt11.elementId == data) {	// if she is the owner, we provide synoptic metas back
 																			syns[socket.id] = { synoptic: data, template:template, mappings:mappings, writable:true, loading: false };		
 																			io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"OK",template:template,mappings:mappings,writable:true}, (k, v) => v === undefined ? null : v)); 
+																			try { bench_out(benchID); } catch(be) {}
 																			isOwner = true;							
 																			if(config["verbose"]) {
 																				console.log(">> DISPLAY OK >>>>>>>");
@@ -993,6 +864,7 @@ io.on("connection", function(socket){
 																		console.log(e);
 																		console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																		io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+																		try { bench_out(benchID); } catch(be) {}
 																		socket.disconnect();
 																		return;
 																	}	
@@ -1001,6 +873,7 @@ io.on("connection", function(socket){
 																// if the requester is not the synoptic's owner, we check to see if she is delegated. For that, we need her username.
 																var xmlHttp9x = new XMLHttpRequest();
 																xmlHttp9x.open( "GET", config["keycloakAuth"]+"realms/master/protocol/openid-connect/userinfo", true );
+																try { xmlHttp9x.bctx = benchID; xmlHttp9x.blbl = "GET "+config["keycloakAuth"]+"realms/master/protocol/openid-connect/userinfo"; } catch(ba) {}
 																if(config["verbose"]) {
 																	console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 																	console.log("Summary: "+logSummary(new Date(),socket.id,"KEYCLOAK USERINFO API CALL"));
@@ -1014,6 +887,7 @@ io.on("connection", function(socket){
 																xmlHttp9x.onreadystatechange = function() { 
 																	try { 
 																		if(xmlHttp9x.readyState < 4) return; 
+																		try { bench_out(this.benchID); } catch(ba) {}
 																		if(config["verbose"]) {
 																			console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 																			console.log("Summary: "+logSummary(new Date(),socket.id,"KEYCLOAK USERINFO API RESPONSE "+xmlHttp9x.status));
@@ -1029,6 +903,7 @@ io.on("connection", function(socket){
 																			// and now that we have her username, we can make a call to the Personal Data API to check for delegations
 																			var xmlHttpAuth12 = new XMLHttpRequest();
 																			xmlHttpAuth12.open( "GET", config["personalDataDelegatedApi"].format(preferred_username,tkns[socket.id]["token"],sourceRequest,sourceId,config["synOwnElmtType"]), true);
+																			try { xmlHttpAuth12.bctx = benchID; xmlHttpAuth12.blbl = "GET "+config["personalDataDelegatedApi"].format(preferred_username,tkns[socket.id]["token"],sourceRequest,sourceId,config["synOwnElmtType"]); } catch(ba) {}
 																			if(config["verbose"]) {
 																				console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 																				console.log("Summary: "+logSummary(new Date(),socket.id,"DELEGATIONS API CALL "+preferred_username+" "+config["synOwnElmtType"]));
@@ -1041,6 +916,7 @@ io.on("connection", function(socket){
 																			xmlHttpAuth12.onreadystatechange = function() {
 																				try {
 																					if(xmlHttpAuth12.readyState < 4) return;
+																					try { bench_out(this.benchID); } catch(ba) {}
 																					if(config["verbose"]) {
 																						console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 																						console.log("Summary: "+logSummary(new Date(),socket.id,"DELEGATIONS API RESPONSE "+xmlHttpAuth12.status));
@@ -1060,6 +936,7 @@ io.on("connection", function(socket){
 																									// if we are here, she is delegated, we then provide back synoptic metas
 																									syns[socket.id] = { synoptic: data, template:template, mappings:mappings, writable:false, loading:false  };		
 																									io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"OK",template:template,mappings:mappings,writable:false}, (k, v) => v === undefined ? null : v)); 
+																									try { bench_out(benchID); } catch(be) {}
 																									isDelegated = true;
 																									if(config["verbose"]) {
 																										console.log(">> DISPLAY OK >>>>>>>");
@@ -1083,6 +960,7 @@ io.on("connection", function(socket){
 																								console.log(e);
 																								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																								io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+																								try { bench_out(benchID); } catch(be) {}
 																								socket.disconnect();
 																							}											
 																						});		
@@ -1097,6 +975,7 @@ io.on("connection", function(socket){
 																								if ((!error) && results.length > 0) { // if the template is public
 																									syns[socket.id] = { synoptic: data, template:template, mappings:mappings, writable:false, loading: false };		
 																									io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"OK",template:template,mappings:mappings,writable:false}, (k, v) => v === undefined ? null : v)); 
+																									try { bench_out(benchID); } catch(be) {}
 																									isPublic = true;
 																									if(config["verbose"]) {
 																										console.log(">> DISPLAY OK >>>>>>>");
@@ -1119,6 +998,7 @@ io.on("connection", function(socket){
 																									console.log("Error: unauthorized");
 																									console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																									io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+																									try { bench_out(benchID); } catch(be) {}
 																									socket.disconnect();
 																									return;
 																								}
@@ -1134,6 +1014,7 @@ io.on("connection", function(socket){
 																								console.log(e);
 																								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																								io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+																								try { bench_out(benchID); } catch(be) {}
 																								socket.disconnect();
 																							}
 																						});														
@@ -1147,6 +1028,7 @@ io.on("connection", function(socket){
 																						console.log("Error: Personal data API returned status code "+xmlHttpAuth12.status);
 																						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																						io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:"Personal data API returned status code "+xmlHttpAuth12.status}, (k, v) => v === undefined ? null : v)); 
+																						try { bench_out(benchID); } catch(be) {}
 																						socket.disconnect();
 																						return;
 																					}
@@ -1162,10 +1044,12 @@ io.on("connection", function(socket){
 																					console.log(e);
 																					console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																					io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, error:e, status:"ERROR"}, (k, v) => v === undefined ? null : v)); 
+																					try { bench_out(benchID); } catch(be) {}
 																					socket.disconnect();
 																					return;
 																				}					
 																			};
+																			try { xmlHttpAuth12.benchID = bench_in(xmlHttpAuth12.bctx,xmlHttpAuth12.blbl); } catch(ba) {}
 																			xmlHttpAuth12.send(null);
 																		}
 																		else {
@@ -1177,6 +1061,7 @@ io.on("connection", function(socket){
 																			console.log("Error: Keycloak userinfo API returned status code "+xmlHttp9x.status);
 																			console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																			io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:"Keycloak userinfo API returned status code "+xmlHttp9x.status}, (k, v) => v === undefined ? null : v)); 
+																			try { bench_out(benchID); } catch(be) {}
 																			socket.disconnect();
 																			return;
 																		}
@@ -1192,10 +1077,12 @@ io.on("connection", function(socket){
 																		console.log(e);
 																		console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																		io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+																		try { bench_out(benchID); } catch(be) {}
 																		socket.disconnect();
 																		return;
 																	}	
 																};
+																try { xmlHttp9x.benchID = bench_in(xmlHttp9x.bctx,xmlHttp9x.blbl); } catch(ba) {}
 																xmlHttp9x.send(null);
 															}
 															else {
@@ -1207,6 +1094,7 @@ io.on("connection", function(socket){
 																console.log("Error: Ownership API returned status code "+xmlHttpAuth11.status);
 																console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:"Ownership API returned status code "+xmlHttpAuth11.status}, (k, v) => v === undefined ? null : v)); 
+																try { bench_out(benchID); } catch(be) {}
 																socket.disconnect();
 																return;
 															}
@@ -1222,10 +1110,12 @@ io.on("connection", function(socket){
 															console.log(e);
 															console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 															io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+															try { bench_out(benchID); } catch(be) {}
 															socket.disconnect();
 															return;
 														}	
 													}; 
+													try { xmlHttpAuth11.benchID = bench_in(xmlHttpAuth11.bctx,xmlHttpAuth11.blbl); } catch(ba) {}
 													xmlHttpAuth11.send(null);
 												}
 												else { // if the requester is not authenticated, our only chance is the synoptic to be public; we then check for it							
@@ -1236,6 +1126,7 @@ io.on("connection", function(socket){
 																if(Object.keys(mappings["output"]).length == 0) { 
 																	syns[socket.id] = { synoptic: data, template:template, mappings:mappings, writable:false, loading:false };		
 																	io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"OK",template:template,mappings:mappings,writable:false}, (k, v) => v === undefined ? null : v)); 
+																	try { bench_out(benchID); } catch(be) {}
 																	if(config["verbose"]) {
 																		console.log(">> DISPLAY OK >>>>>>>");
 																		console.log("Summary: "+logSummary(new Date(),socket.id,"DISPLAY OK FOR SYNOPTIC "+data));
@@ -1251,6 +1142,7 @@ io.on("connection", function(socket){
 																	if(varName.startsWith("s4csvg_")) {
 																		syns[socket.id] = { synoptic: data, template:template, mappings:mappings, writable:true, loading:false };		
 																		io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"OK",template:template,mappings:mappings,writable:false}, (k, v) => v === undefined ? null : v)); 
+																		try { bench_out(benchID); } catch(be) {}
 																		if(config["verbose"]) {
 																			console.log(">> DISPLAY OK >>>>>>>");
 																			console.log("Summary: "+logSummary(new Date(),socket.id,"DISPLAY OK FOR SYNOPTIC "+data));
@@ -1264,6 +1156,7 @@ io.on("connection", function(socket){
 																	else if(varName.startsWith("shared_")) {
 																		syns[socket.id] = { synoptic: data, template:template, mappings:mappings, writable:true, loading:false };		
 																		io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"OK",template:template,mappings:mappings,writable:false}, (k, v) => v === undefined ? null : v)); 
+																		try { bench_out(benchID); } catch(be) {}
 																		if(config["verbose"]) {
 																			console.log(">> DISPLAY OK >>>>>>>");
 																			console.log("Summary: "+logSummary(new Date(),socket.id,"DISPLAY OK FOR SYNOPTIC "+data));
@@ -1278,16 +1171,20 @@ io.on("connection", function(socket){
 																		var chkUrl = config["getOnePublicKpiValue"].format(varName,sourceRequest,sourceId); 
 																		var xmlHttpChkx = new XMLHttpRequest();
 																		xmlHttpChkx.open( "GET", chkUrl, true);
+																		try { xmlHttpChkx.bctx = benchID; xmlHttpChkx.blbl = "GET "+chkUrl; } catch(ba) {}
 																		xmlHttpChkx.onreadystatechange = function() {	
 																			try {
 																				if(xmlHttpChkx.readyState < 4) return;	
+																				try { bench_out(this.benchID); } catch(ba) {}
 																				if(xmlHttpChkx.status == 200) {
 																					// authenticate with default user, and deliver synoptic
 																					var xmlHttpwpubltknb = new XMLHttpRequest();
 																					xmlHttpwpubltknb.open("POST", config["keycloakAuth"]+"realms/master/protocol/openid-connect/token", true);
+																					try { xmlHttpwpubltknb.bctx = benchID; xmlHttpwpubltknb.blbl = "POST "+config["keycloakAuth"]+"realms/master/protocol/openid-connect/token"; } catch(ba) {}
 																					xmlHttpwpubltknb.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 																					xmlHttpwpubltknb.onreadystatechange = function() {								
 																						if(xmlHttpwpubltknb.readyState < 4) return;
+																						try { bench_out(this.benchID); } catch(ba) {}
 																						if(xmlHttpwpubltknb.status != 200) {
 																							console.log("ERROR! Unable to authenticate as public writer. Check public writer credentials in configuration file.");
 																							return;
@@ -1309,6 +1206,7 @@ io.on("connection", function(socket){
 																							// We validate the provided access token by checking if we are able to retrieve user information from the Keycloak using the provided token
 																							var xmlHttp9xab = new XMLHttpRequest();
 																							xmlHttp9xab.open( "GET", config["keycloakAuth"]+"realms/master/protocol/openid-connect/userinfo", true );
+																							try { xmlHttp9xab.bctx = benchID; xmlHttp9xab.blbl = "GET "+config["keycloakAuth"]+"realms/master/protocol/openid-connect/userinfo"; } catch(ba) {}
 																							if(config["verbose"]) {
 																								console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 																								console.log("Summary: "+logSummary(new Date(),socket.id,"KEYCLOAK USERINFO API CALL"));
@@ -1322,6 +1220,7 @@ io.on("connection", function(socket){
 																							xmlHttp9xab.onreadystatechange = function() { 
 																								try { 
 																									if(xmlHttp9xab.readyState < 4) return;
+																									try { bench_out(this.benchID); } catch(ba) {}
 																									if(config["verbose"]) {
 																										console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 																										console.log("Summary: "+logSummary(new Date(),socket.id,"KEYCLOAK USERINFO API RESPONSE "+xmlHttp9xab.status));
@@ -1364,6 +1263,7 @@ io.on("connection", function(socket){
 																											}
 																										});									
 																										io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: fkAuthData, status:"OK"}, (k, v) => v === undefined ? null : v)); 
+																										try { bench_out(benchID); } catch(be) {}
 																										if(config["verbose"]) {
 																											console.log(">> AUTHENTICATE OK >>>>>>>>>>>");
 																											console.log("Summary: "+logSummary(new Date(),socket.id,"AUTHENTICATION AS DEFAULT USER OK"));
@@ -1376,6 +1276,7 @@ io.on("connection", function(socket){
 																										// Now that the user is some way authenticated, we also deliver confirmation and metadata about the synoptic
 																										syns[socket.id] = { synoptic: data, template:template, mappings:mappings, writable:true, loading:false };		
 																										io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"OK",template:template,mappings:mappings,writable:false}, (k, v) => v === undefined ? null : v)); 
+																										try { bench_out(benchID); } catch(be) {}
 																										if(config["verbose"]) {
 																											console.log(">> DISPLAY OK >>>>>>>");
 																											console.log("Summary: "+logSummary(new Date(),socket.id,"DISPLAY OK FOR SYNOPTIC "+data));
@@ -1398,6 +1299,7 @@ io.on("connection", function(socket){
 																										console.log("Error returned to the user: cannot get user info (invalid token?)");
 																										console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																										io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: fkAuthData, status:"ERROR",error:"cannot get user info (invalid token?)"}, (k, v) => v === undefined ? null : v)); 
+																										try { bench_out(benchID); } catch(be) {}
 																										return;
 																									}
 																								}
@@ -1412,9 +1314,11 @@ io.on("connection", function(socket){
 																									console.log(e);
 																									console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																									io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: fkAuthData, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+																									try { bench_out(benchID); } catch(be) {}
 																								}
 																								return;
 																							};
+																							try { xmlHttp9xab.benchID = bench_in(xmlHttp9xab.bctx,xmlHttp9xab.blbl); } catch(ba) {}
 																							xmlHttp9xab.send(null);
 																						}
 																						catch(e) {
@@ -1428,10 +1332,12 @@ io.on("connection", function(socket){
 																							console.log(e);
 																							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																							io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: fkAuthData, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+																							try { bench_out(benchID); } catch(be) {}
 																							return;
 																						}
 
 																					};
+																					try { xmlHttpwpubltknb.benchID = bench_in(xmlHttpwpubltknb.bctx,xmlHttpwpubltknb.blbl); } catch(ba) {}
 																					xmlHttpwpubltknb.send("grant_type=password&username="+config["publicWriting"]["usr"]+"&password="+config["publicWriting"]["pwd"]+"&client_id="+config["publicWriting"]["cid"]);
 																				}
 																				else {
@@ -1445,6 +1351,7 @@ io.on("connection", function(socket){
 																					console.log("Error: unauthorized, the template contains write operations on non-public KPI variables, that cannot be performed without prior authentication");
 																					console.log("<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																					io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+																					try { bench_out(benchID); } catch(be) {}
 																					socket.disconnect();
 																					return;
 																				}																
@@ -1460,10 +1367,12 @@ io.on("connection", function(socket){
 																				console.log(e);
 																				console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																				io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+																				try { bench_out(benchID); } catch(be) {}
 																				socket.disconnect();
 																				return;
 																			}
 																		};
+																		try { xmlHttpChkx.benchID = bench_in(xmlHttpChkx.bctx,xmlHttpChkx.blbl); } catch(ba) {}
 																		xmlHttpChkx.send();
 																	}
 																}
@@ -1478,6 +1387,7 @@ io.on("connection", function(socket){
 																	if(!wrtKpis) {
 																		syns[socket.id] = { synoptic: data, template:template, mappings:mappings, writable:true, loading:false };		
 																		io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"OK",template:template,mappings:mappings,writable:false}, (k, v) => v === undefined ? null : v)); 
+																		try { bench_out(benchID); } catch(be) {}
 																		if(config["verbose"]) {
 																			console.log(">> DISPLAY OK >>>>>>>");
 																			console.log("Summary: "+logSummary(new Date(),socket.id,"DISPLAY OK FOR SYNOPTIC "+data));
@@ -1491,9 +1401,11 @@ io.on("connection", function(socket){
 																	else {											
 																		var xmlHttpw = new XMLHttpRequest();
 																		xmlHttpw.open( "GET", config["getPublicValue"].format(sourceRequest,sourceId), true);
+																		try { xmlHttpw.bctx = benchID; xmlHttpw.blbl = "GET "+config["getPublicValue"].format(sourceRequest,sourceId); } catch(ba) {}
 																		xmlHttpw.onreadystatechange = function() {
 																			try {
 																				if(xmlHttpw.readyState < 4) return;
+																				try { bench_out(this.benchID); } catch(ba) {}
 																				if(xmlHttpw.status == 200) {
 																					var responseJson = JSON.parse(xmlHttpw.responseText);
 																					var publicKpis = [];
@@ -1512,6 +1424,7 @@ io.on("connection", function(socket){
 																								console.log("Error: unauthorized, the template contains write operations on non-public KPI variables, that cannot be performed without prior authentication");
 																								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																								io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+																								try { bench_out(benchID); } catch(be) {}
 																								socket.disconnect();
 																								return;
 																							}
@@ -1527,6 +1440,7 @@ io.on("connection", function(socket){
 																							console.log(e);
 																							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																							io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+																							try { bench_out(benchID); } catch(be) {}
 																							socket.disconnect();
 																							return;
 																						}
@@ -1534,9 +1448,11 @@ io.on("connection", function(socket){
 																					// if you have arrived here, it means that everything is OK, so authenticate as default user and deliver synoptic
 																					var xmlHttpwpubltknb = new XMLHttpRequest();
 																					xmlHttpwpubltknb.open("POST", config["keycloakAuth"]+"realms/master/protocol/openid-connect/token", true);
+																					try { xmlHttpwpubltknb.bctx = benchID; xmlHttpwpubltknb.blbl = "POST "+config["keycloakAuth"]+"realms/master/protocol/openid-connect/token"; } catch(ba) {}
 																					xmlHttpwpubltknb.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 																					xmlHttpwpubltknb.onreadystatechange = function() {								
 																						if(xmlHttpwpubltknb.readyState < 4) return;
+																						try { bench_out(this.benchID); } catch(ba) {}
 																						if(xmlHttpwpubltknb.status != 200) {
 																							console.log("ERROR! Unable to authenticate as public writer. Check public writer credentials in configuration file.");
 																							return;
@@ -1558,6 +1474,7 @@ io.on("connection", function(socket){
 																							// We validate the provided access token by checking if we are able to retrieve user information from the Keycloak using the provided token
 																							var xmlHttp9xac = new XMLHttpRequest();
 																							xmlHttp9xac.open( "GET", config["keycloakAuth"]+"realms/master/protocol/openid-connect/userinfo", true );
+																							try { xmlHttp9xac.bctx = benchID; xmlHttp9xac.blbl = "GET "+config["keycloakAuth"]+"realms/master/protocol/openid-connect/userinfo"; } catch(ba) {}
 																							if(config["verbose"]) {
 																								console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 																								console.log("Summary: "+logSummary(new Date(),socket.id,"KEYCLOAK USERINFO API CALL"));
@@ -1571,6 +1488,7 @@ io.on("connection", function(socket){
 																							xmlHttp9xac.onreadystatechange = function() { 
 																								try { 
 																									if(xmlHttp9xac.readyState < 4) return;
+																									try { bench_out(this.benchID); } catch(ba) {}
 																									if(config["verbose"]) {
 																										console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 																										console.log("Summary: "+logSummary(new Date(),socket.id,"KEYCLOAK USERINFO API RESPONSE "+xmlHttp9xac.status));
@@ -1613,6 +1531,7 @@ io.on("connection", function(socket){
 																											}
 																										});									
 																										io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: fkAuthData, status:"OK"}, (k, v) => v === undefined ? null : v)); 
+																										try { bench_out(benchID); } catch(be) {}
 																										if(config["verbose"]) {
 																											console.log(">> AUTHENTICATE OK >>>>>>>>>>>");
 																											console.log("Summary: "+logSummary(new Date(),socket.id,"AUTHENTICATE OK AS DEFAULT USER"));
@@ -1625,6 +1544,7 @@ io.on("connection", function(socket){
 																										// Now that the user is some way authenticated, we also deliver confirmation and metadata about the synoptic
 																										syns[socket.id] = { synoptic: data, template:template, mappings:mappings, writable:true, loading:false };		
 																										io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"OK",template:template,mappings:mappings,writable:false}, (k, v) => v === undefined ? null : v)); 
+																										try { bench_out(benchID); } catch(be) {}
 																										if(config["verbose"]) {
 																											console.log(">> DISPLAY OK >>>>>>>");
 																											console.log("Summary: "+logSummary(new Date(),socket.id,"DISPLAY OK FOR SYNOPTIC "+data));
@@ -1649,6 +1569,7 @@ io.on("connection", function(socket){
 																										console.log("Error returned to the user: cannot get user info (invalid token?)");
 																										console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																										io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: fkAuthData, status:"ERROR",error:"cannot get user info (invalid token?)"}, (k, v) => v === undefined ? null : v)); 
+																										try { bench_out(benchID); } catch(be) {}
 																										return;
 																									}
 																								}
@@ -1663,9 +1584,11 @@ io.on("connection", function(socket){
 																									console.log(e);
 																									console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																									io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: fkAuthData, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+																									try { bench_out(benchID); } catch(be) {}
 																								}
 																								return;
 																							};
+																							try { xmlHttp9xac.benchID = bench_in(xmlHttp9xac.bctx,xmlHttp9xac.blbl); } catch(ba) {}
 																							xmlHttp9xac.send(null);
 																						}
 																						catch(e) {
@@ -1679,10 +1602,12 @@ io.on("connection", function(socket){
 																							console.log(e);
 																							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																							io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: fkAuthData, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+																							try { bench_out(benchID); } catch(be) {}
 																							return;
 																						}
 
 																					};
+																					try { xmlHttpwpubltknb.benchID = bench_in(xmlHttpwpubltknb.bctx,xmlHttpwpubltknb.blbl); } catch(ba) {}
 																					xmlHttpwpubltknb.send("grant_type=password&username="+config["publicWriting"]["usr"]+"&password="+config["publicWriting"]["pwd"]+"&client_id="+config["publicWriting"]["cid"]);
 																				}
 																				else {
@@ -1697,6 +1622,7 @@ io.on("connection", function(socket){
 																					console.log("returned HTTP status code "+xmlHttpw.status);
 																					console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																					io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:"internal error"}, (k, v) => v === undefined ? null : v)); 
+																					try { bench_out(benchID); } catch(be) {}
 																					socket.disconnect();
 																					return;
 																				}
@@ -1712,10 +1638,12 @@ io.on("connection", function(socket){
 																				console.log(e);
 																				console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																				io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+																				try { bench_out(benchID); } catch(be) {}
 																				socket.disconnect();
 																				return;
 																			}
 																		};
+																		try { xmlHttpw.benchID = bench_in(xmlHttpw.bctx,xmlHttpw.blbl); } catch(ba) {}
 																		xmlHttpw.send();												
 																	}
 																}
@@ -1731,6 +1659,7 @@ io.on("connection", function(socket){
 																console.log("Error: unauthorized");
 																console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+																try { bench_out(benchID); } catch(be) {}
 																socket.disconnect();
 																return;
 															}
@@ -1746,6 +1675,7 @@ io.on("connection", function(socket){
 															console.log(e);
 															console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 															io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+															try { bench_out(benchID); } catch(be) {}
 															socket.disconnect();
 															return;
 														}
@@ -1764,6 +1694,7 @@ io.on("connection", function(socket){
 												console.log(e);
 												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 												io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+												try { bench_out(benchID); } catch(be) {}
 												socket.disconnect();
 												return;
 											}
@@ -1781,6 +1712,7 @@ io.on("connection", function(socket){
 									console.log(e);
 									console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 									io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+									try { bench_out(benchID); } catch(be) {}
 									socket.disconnect();
 									return;
 								} 
@@ -1799,10 +1731,12 @@ io.on("connection", function(socket){
 						console.log(e);
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						socket.disconnect();
 						return;
 					}
 				};
+				try { xmlHttpTpl.benchID = bench_in(xmlHttpTpl.bctx,xmlHttpTpl.blbl); } catch(ba) {}
 				xmlHttpTpl.send(null);					
 			} 
 			catch(e) {
@@ -1816,12 +1750,14 @@ io.on("connection", function(socket){
 				console.log(e);
 				console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 				io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+				try { bench_out(benchID); } catch(be) {}
 				socket.disconnect();
 				return;
 			}				
 		});
 		
 		socket.on("authenticate", function(data) { // this event is used by a client for submitting its access token
+			var benchID = null; try { benchID = bench_in(socket.id,"authenticate"); } catch(be) {}
 			try {
 				if(config["verbose"]) {
 					console.log(">> CLIENT EVENT: authenticate >>>>>>>>>>>>>>>>>>"); 
@@ -1837,6 +1773,7 @@ io.on("connection", function(socket){
 				// We validate the provided access token by checking if we are able to retrieve user information from the Keycloak using the provided token
 				var xmlHttp9xa = new XMLHttpRequest();
 				xmlHttp9xa.open( "GET", config["keycloakAuth"]+"realms/master/protocol/openid-connect/userinfo", true );
+				try { xmlHttp9xa.bctx = benchID; xmlHttp9xa.blbl = "GET "+config["keycloakAuth"]+"realms/master/protocol/openid-connect/userinfo"; } catch(ba) {}
 				if(config["verbose"]) {
 					console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 					console.log("Summary: "+logSummary(new Date(),socket.id,"KEYCLOAK USERINFO API CALL"));
@@ -1850,6 +1787,7 @@ io.on("connection", function(socket){
 				xmlHttp9xa.onreadystatechange = function() { 
 					try { 
 						if(xmlHttp9xa.readyState < 4) return;
+						try { bench_out(this.benchID); } catch(ba) {}
 						if(config["verbose"]) {
 							console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 							console.log("Summary: "+logSummary(new Date(),socket.id,"KEYCLOAK USERINFO API RESPONSE "+xmlHttp9xa.status));
@@ -1892,6 +1830,7 @@ io.on("connection", function(socket){
 								}
 							});									
 							io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 
+							try { bench_out(benchID); } catch(be) {}
 							if(config["verbose"]) {
 								console.log(">> AUTHENTICATE OK >>>>>>>>>>>");
 								console.log("Summary: "+logSummary(new Date(),socket.id,"AUTHENTICATED"+(tkns[socket.id]?" AS "+tkns[socket.id]["username"]:"")));
@@ -1913,6 +1852,7 @@ io.on("connection", function(socket){
 							console.log("Error: cannot get user info. The client has sent an \"authenticate\" socket.io event, attaching \""+data+"\" as the payload (access token). The error message returned to the client is \"cannot get user info (invalid token?)\".");
 							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 							io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: data, status:"ERROR",error:"cannot get user info (invalid token?)"}, (k, v) => v === undefined ? null : v)); 
+							try { bench_out(benchID); } catch(be) {}
 							return;
 						}
 					}
@@ -1927,9 +1867,11 @@ io.on("connection", function(socket){
 						console.log(e);
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 					}
 					return;
 				};
+				try { xmlHttp9xa.benchID = bench_in(xmlHttp9xa.bctx,xmlHttp9xa.blbl); } catch(ba) {}
 				xmlHttp9xa.send(null);
 			}
 			catch(e) {
@@ -1943,11 +1885,13 @@ io.on("connection", function(socket){
 				console.log(e);
 				console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 				io.in(socket.id).emit("authenticate",JSON.stringify({event: "authenticate", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+				try { bench_out(benchID); } catch(be) {}
 				return;
 			}
 		});
 		
 		socket.on("read", function(data) { // this event is used by clients for a one-shot read of a variable value
+			var benchID = null; try { benchID = bench_in(socket.id,"read"); } catch(be) {}
 			try {
 				if(config["verbose"]) {
 					console.log(">> CLIENT EVENT: read >>>>>>>>>>>>>>>>>>>>>>>>>>"); 
@@ -1969,6 +1913,7 @@ io.on("connection", function(socket){
 						lastValue: new Buffer(data.substr(6),"base64").toString("utf8"), 
 						timestamp: new Date().getTime()
 					}, (k, v) => v === undefined ? null : v)); 
+					try { bench_out(benchID); } catch(be) {}
 					if(config["verbose"]) {
 						console.log(">> READ OK >>>>>>>>>>>>>>");
 						console.log("Summary: "+logSummary(new Date(),socket.id,"READ OK FOR "+data));
@@ -1991,6 +1936,7 @@ io.on("connection", function(socket){
 							lastValue: lastValue,
 							timestamp: shared[data]["timestamp"] 
 						}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						if(config["verbose"]) {
 							console.log(">> READ OK >>>>>>>>>>>>>>");
 							console.log("Summary: "+logSummary(new Date(),socket.id,"READ OK "+data));
@@ -2019,6 +1965,7 @@ io.on("connection", function(socket){
 						console.log("Error: shared variable not found, maybe a typo in variable name?");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("read",JSON.stringify({event: "read", request: data, status:"ERROR",error:"Shared variable \""+data+"\" not found. Maybe a typo in variable name?"}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						return;
 					}
 				}
@@ -2034,6 +1981,7 @@ io.on("connection", function(socket){
 						console.log("Error: Synoptic is loading, please wait.");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("write",JSON.stringify({event: "read", request: data, status:"ERROR",error:"Synoptic is loading, please wait."}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						return;
 					}
 					if(syns[socket.id] && vars[data] && vars[data][syns[socket.id]["synoptic"]]) { // if the socket is binded to a synoptic (that is necessary because non-mapped variables scope is the synoptic) and if the variable has a value for the specific synoptic
@@ -2046,6 +1994,7 @@ io.on("connection", function(socket){
 							lastValue: lastValue, 
 							timestamp: vars[data][syns[socket.id]["synoptic"]]["timestamp"] 
 						}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						if(config["kafka"]["enable"]["nonMapped"]) listenBroker(vars[data][syns[socket.id]["synoptic"]]["id"]);
 						if(config["verbose"]) {
 							console.log(">> READ OK >>>>>>>>>>>>>>");
@@ -2079,6 +2028,7 @@ io.on("connection", function(socket){
 						if(!syns[socket.id]) io.in(socket.id).emit("read",JSON.stringify({event: "read", request: data, status:"ERROR",error:"Bind to a synoptic first, throught he \"display\" event."}, (k, v) => v === undefined ? null : v)); 
 						else if(!(syns[socket.id] && syns[socket.id]["mappings"] && syns[socket.id]["mappings"]["input"] && syns[socket.id]["mappings"]["input"][data])) io.in(socket.id).emit("read",JSON.stringify({event: "read", request: data, status:"ERROR",error:"Non-mapped variable \""+data+"\" not found in current synoptic. Maybe a typo in variable name?"}, (k, v) => v === undefined ? null : v)); 
 						else io.in(socket.id).emit("read",JSON.stringify({event: "read", request: data, status:"ERROR",error:"No value found for this variable in current synoptic"}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 					}
 				}
 				else if(isNaN(data)) { // sensor
@@ -2094,6 +2044,7 @@ io.on("connection", function(socket){
 									lastValue: lastValue, 
 									timestamp: sens[data]["timestamp"] 
 								}, (k, v) => v === undefined ? null : v)); 
+								try { bench_out(benchID); } catch(be) {}
 								if(config["kafka"]["enable"]["sensors"]) listenBroker(data);
 								if(config["verbose"]) {
 									console.log(">> READ OK >>>>>>>>>>>>>>");
@@ -2123,6 +2074,7 @@ io.on("connection", function(socket){
 								console.log("Error: no value");
 								console.log("<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 								io.in(socket.id).emit("read",JSON.stringify({event: "read", request: data, status:"ERROR",error:"No value"}, (k, v) => v === undefined ? null : v)); 
+								try { bench_out(benchID); } catch(be) {}
 							}								
 						}
 						else { // if the requster is already known not to be granted access to the sensor
@@ -2135,6 +2087,7 @@ io.on("connection", function(socket){
 							console.log("Error: unauthorized");
 							console.log("<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 							io.in(socket.id).emit("read",JSON.stringify({event: "read", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+							try { bench_out(benchID); } catch(be) {}
 							return;
 						}
 					}	
@@ -2145,6 +2098,7 @@ io.on("connection", function(socket){
 						else chkUrl =  config["getOnePublicSensorValue"].format(data.split(" ")[0],data.split(" ")[1]); 
 						var xmlHttpChkd = new XMLHttpRequest();
 						xmlHttpChkd.open( "GET", chkUrl, true);
+						try { xmlHttpChkd.bctx = benchID; xmlHttpChkd.blbl = "GET "+chkUrl; } catch(ba) {}
 						if(config["verbose"]) {
 							console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 							console.log("Summary: "+logSummary(new Date(),socket.id,"SENSOR API CALL"));
@@ -2157,6 +2111,7 @@ io.on("connection", function(socket){
 						xmlHttpChkd.onreadystatechange = function() {	
 							try {
 								if(xmlHttpChkd.readyState < 4) return;
+								try { bench_out(this.benchID); } catch(ba) {}
 								if(config["verbose"]) {
 									console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 									console.log("Summary: "+logSummary(new Date(),socket.id,"SENSOR API RESPONSE "+xmlHttpChkd.status));
@@ -2171,7 +2126,11 @@ io.on("connection", function(socket){
 								var value = null;
 								var timestamp = null;
 								if(isAuthorized) { // only if authorized, we retrieve the last value and its associated timestamp
-									if(JSON.parse(xmlHttpChkd.responseText)["realtime"]["results"]) { // if the sensor actually exists (it could be that the device exists and the requester is granted, but the sensor name is mispelled, for example)
+									if("__location" == data.split(" ")[1]) {
+										value = { "longitude": JSON.parse(xmlHttpChkd.responseText)["Service"]["features"][0]["geometry"]["coordinates"][0]+"", "latitude": JSON.parse(xmlHttpChkd.responseText)["Service"]["features"][0]["geometry"]["coordinates"][1]+"" }; 
+										timestamp = new Date().getTime();
+									}
+									else if(JSON.parse(xmlHttpChkd.responseText)["realtime"]["results"]) { // if the sensor actually exists (it could be that the device exists and the requester is granted, but the sensor name is mispelled, for example)
 										JSON.parse(xmlHttpChkd.responseText)["realtime"]["results"]["bindings"].forEach(function(binding) { 
 											value = binding[data.split(" ")[1]]["value"]; 
 											timestamp = new Date(binding["measuredTime"]["value"]).getTime();
@@ -2187,6 +2146,7 @@ io.on("connection", function(socket){
 										console.log("Error: No value. Sensor is missing or not working.");
 										console.log("<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 										io.in(socket.id).emit("read",JSON.stringify({event: "read", request: data, status:"ERROR",error:"No value. Sensor is missing or not working."}, (k, v) => v === undefined ? null : v)); 
+										try { bench_out(benchID); } catch(be) {}
 										return;
 									}
 								}
@@ -2215,6 +2175,7 @@ io.on("connection", function(socket){
 										lastValue: lastValue, 
 										timestamp: sens[data]["timestamp"] 
 									}, (k, v) => v === undefined ? null : v)); 
+									try { bench_out(benchID); } catch(be) {}
 									if(config["kafka"]["enable"]["sensors"]) listenBroker(data);
 									if(config["verbose"]) {
 										console.log(">> READ OK >>>>>>>>>>>>>>");
@@ -2244,6 +2205,7 @@ io.on("connection", function(socket){
 									console.log("Error: unauthorized");
 									console.log("<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 									io.in(socket.id).emit("read",JSON.stringify({event: "read", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+									try { bench_out(benchID); } catch(be) {}
 								}
 							}
 							catch(e) {
@@ -2257,8 +2219,10 @@ io.on("connection", function(socket){
 								console.log(e);
 								console.log("<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 								io.in(socket.id).emit("read",JSON.stringify({event: "read", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+								try { bench_out(benchID); } catch(be) {}
 							}
 						};
+						try { xmlHttpChkd.benchID = bench_in(xmlHttpChkd.bctx,xmlHttpChkd.blbl); } catch(ba) {}
 						xmlHttpChkd.send(null);
 					}						
 				}
@@ -2275,6 +2239,7 @@ io.on("connection", function(socket){
 									lastValue: lastValue, 
 									timestamp: kpis[data]["timestamp"] 
 								}, (k, v) => v === undefined ? null : v)); 
+								try { bench_out(benchID); } catch(be) {}
 								if(config["kafka"]["enable"]["myKPIs"]) listenBroker("kpi-"+data);
 								if(config["verbose"]) {
 									console.log(">> READ OK >>>>>>>>>>>>>>");
@@ -2304,6 +2269,7 @@ io.on("connection", function(socket){
 								console.log("Error: no value");
 								console.log("<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 								io.in(socket.id).emit("read",JSON.stringify({event: "read", request: data, status:"ERROR",error:"No value"}, (k, v) => v === undefined ? null : v)); 
+								try { bench_out(benchID); } catch(be) {}
 								return;
 							}								
 						}
@@ -2317,6 +2283,7 @@ io.on("connection", function(socket){
 							console.log("Error: unauthorized");
 							console.log("<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 							io.in(socket.id).emit("read",JSON.stringify({event: "read", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+							try { bench_out(benchID); } catch(be) {}
 						}
 					}	
 					else {						
@@ -2326,6 +2293,7 @@ io.on("connection", function(socket){
 						else chkUrl =  config["getOnePublicKpiValue"].format(data,sourceRequest,sourceId); 
 						var xmlHttpChka = new XMLHttpRequest();
 						xmlHttpChka.open( "GET", chkUrl, true);
+						try { xmlHttpChka.bctx = benchID; xmlHttpChka.blbl = "GET "+chkUrl; } catch(ba) {}
 						if(config["verbose"]) {
 							console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 							console.log("Summary: "+logSummary(new Date(),socket.id,"KPI API CALL"));
@@ -2338,6 +2306,7 @@ io.on("connection", function(socket){
 						xmlHttpChka.onreadystatechange = function() {	
 							try {
 								if(xmlHttpChka.readyState < 4) return;
+								try { bench_out(this.benchID); } catch(ba) {}
 								if(config["verbose"]) {
 									console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 									console.log("Summary: "+logSummary(new Date(),socket.id,"KPI API RESPONSE "+xmlHttpChka.status));
@@ -2382,6 +2351,7 @@ io.on("connection", function(socket){
 										lastValue: lastValue, 
 										timestamp: kpis[data]["timestamp"] 
 									}, (k, v) => v === undefined ? null : v)); 
+									try { bench_out(benchID); } catch(be) {}
 									if(config["kafka"]["enable"]["myKPIs"]) listenBroker("kpi-"+data);
 									if(config["verbose"]) {
 										console.log(">> READ OK >>>>>>>>>>>>>>");
@@ -2411,6 +2381,7 @@ io.on("connection", function(socket){
 									console.log("Error: unauthorized");
 									console.log("<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 									io.in(socket.id).emit("read",JSON.stringify({event: "read", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+									try { bench_out(benchID); } catch(be) {}
 								}
 							}
 							catch(e) {
@@ -2424,8 +2395,10 @@ io.on("connection", function(socket){
 								console.log(e);
 								console.log("<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 								io.in(socket.id).emit("read",JSON.stringify({event: "read", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 							
+								try { bench_out(benchID); } catch(be) {}
 							}
 						};
+						try { xmlHttpChka.benchID = bench_in(xmlHttpChka.bctx,xmlHttpChka.blbl); } catch(ba) {}
 						xmlHttpChka.send(null);
 					}							
 				}
@@ -2442,10 +2415,12 @@ io.on("connection", function(socket){
 				console.log(e);
 				console.log("<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 				io.in(socket.id).emit("read",JSON.stringify({event: "read", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+				try { bench_out(benchID); } catch(be) {}
 			}
 		});
 		
 		socket.on("write", function(data) { // this event is used by clients for writing variables
+			var benchID = null; try { benchID = bench_in(socket.id,"write"); } catch(be) {}
 			try {					
 				if(config["verbose"]) {
 					console.log(">> CLIENT EVENT: write >>>>>>>>>>>>>>>>>>>>>>>>>>"); 
@@ -2474,6 +2449,7 @@ io.on("connection", function(socket){
 								lastValue: lastValue, 
 								timestamp: shared[dataObj.id]["timestamp"]
 							}, (k, v) => v === undefined ? null : v)); 
+							try { bench_out(benchID); } catch(be) {}
 							if(config["verbose"]) {
 								console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
 								console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERED FOR "+shared[dataObj.id]["id"]));
@@ -2510,7 +2486,7 @@ io.on("connection", function(socket){
 					if(config["kafka"]["enable"]["shared"]) notifyBroker({ 
 						event: "shared_"+shared[dataObj.id]["id"],
 						id: shared[dataObj.id]["id"], 
-						lastValue: shared[dataObj.id]["value"], 
+						value: shared[dataObj.id]["value"], 
 						timestamp: shared[dataObj.id]["timestamp"],
 						from: config["srvSrcReq"]
 					},socket.id);					
@@ -2571,6 +2547,7 @@ io.on("connection", function(socket){
 						console.log("<<<<<<<<<<<<<<<<<<<\n\n");
 					}
 					io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 
+					try { bench_out(benchID); } catch(be) {}
 					if(config["verbose"]) {
 						console.log(">> WRITE OK >>>>>>>>>>>>>>>>>>>>");
 						console.log("Summary: "+logSummary(new Date(),socket.id,"WRITE OK FOR "+dataObj.id));
@@ -2593,6 +2570,7 @@ io.on("connection", function(socket){
 						console.log("Error: Synoptic is loading, please wait.");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"ERROR",error:"Synoptic is loading, please wait."}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						return;
 					}
 					if(!syns[socket.id]) { // if the socket is not binded to any synoptic, fail. Indeed, the scope of non-mapped variables is the synoptic, so the socket MUST be binded to a synoptic for that the request could make sense.
@@ -2606,6 +2584,7 @@ io.on("connection", function(socket){
 						console.log("Error: Socket is not binded to any synoptic");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"ERROR",error:"Bind to a synoptic first, throught the \"display\" event."}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						return;
 					}
 					if(!(syns[socket.id] && syns[socket.id]["writable"])) { // if the requester is not the owner of the synoptic, fail. Indeed, only the synoptic's owner can write non-mapped variables for a synoptic
@@ -2619,6 +2598,7 @@ io.on("connection", function(socket){
 						console.log("Error: The requester is not the synoptic owner.");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						return;
 					}
 					if(!(syns[socket.id] && syns[socket.id]["mappings"] && syns[socket.id]["mappings"]["output"] && syns[socket.id]["mappings"]["output"][dataObj["id"]]) && !(syns[socket.id] && syns[socket.id]["mappings"] && syns[socket.id]["mappings"]["input"] && syns[socket.id]["mappings"]["input"][dataObj["id"]])) { // if the variable does not exist in current synoptic
@@ -2632,6 +2612,7 @@ io.on("connection", function(socket){
 						console.log("Error: Non-mapped variable not found in current synoptic, maybe a typo in variable name?");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"ERROR",error:"Non-mapped variable not found in current synoptic. Maybe a typo in variable name?"}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						return;
 					}					
 					// build/refresh the in-memory non-mapped variable (remember non-mapped variables exist nowhere else than in socket server memory though)
@@ -2649,6 +2630,7 @@ io.on("connection", function(socket){
 								synoptic: syns[socket.id]["synoptic"], 
 								timestamp: vars[dataObj.id][syns[socket.id]["synoptic"]]["timestamp"]
 							}, (k, v) => v === undefined ? null : v)); 
+							try { bench_out(benchID); } catch(be) {}
 							if(config["verbose"]) {
 								console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
 								console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERED FOR "+dataObj.id+" OF "+syns[socket.id]["synoptic"]));
@@ -2687,7 +2669,7 @@ io.on("connection", function(socket){
 					if(config["kafka"]["enable"]["nonMapped"]) notifyBroker({ 
 						event: "nonMapped_"+syns[socket.id]["synoptic"]+"_"+vars[dataObj.id][syns[socket.id]["synoptic"]]["id"],
 						id: vars[dataObj.id][syns[socket.id]["synoptic"]]["id"], 
-						lastValue: vars[dataObj.id][syns[socket.id]["synoptic"]]["value"], 
+						value: vars[dataObj.id][syns[socket.id]["synoptic"]]["value"], 
 						synoptic: syns[socket.id]["synoptic"], 
 						timestamp: vars[dataObj.id][syns[socket.id]["synoptic"]]["timestamp"],
 						from: config["srvSrcReq"]
@@ -2761,6 +2743,7 @@ io.on("connection", function(socket){
 					}
 					//	
 					io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 
+					try { bench_out(benchID); } catch(be) {}
 					if(config["verbose"]) {
 						console.log(">> WRITE OK >>>>>>>>>>>>>>>>>>>>");
 						console.log("Summary: "+logSummary(new Date(),socket.id,"WRITE OK FOR "+dataObj.id+" OF "+(syns[socket.id]?syns[socket.id]["synoptic"]:"null")));
@@ -2785,6 +2768,7 @@ io.on("connection", function(socket){
 						console.log(obj);
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("write",JSON.stringify({event: "write", request: obj, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						return;
 					}
 					if(false && kpis[obj.id] && kpis[obj.id]["editors"] && kpis[obj.id]["editors"].includes(tkns[socket.id]["username"])) { // if the requester has already written the variable in current socket, immediately edit in-memory copy of the KPI and deliver the new value to all subscribed sockets and to the broker. This behavior is now disabled (June 23, 2020), since we have changed our mind and decided that we want to deliver the new value to clients only after that a positive response has arrived from the KPI Data Value API. That is the reason for which we have a false at the beginning of the condition.
@@ -2801,6 +2785,7 @@ io.on("connection", function(socket){
 										lastValue: lastValue, 
 										timestamp: dataTime.getTime()
 									}, (k, v) => v === undefined ? null : v)); 
+									try { bench_out(benchID); } catch(be) {}
 									if(config["verbose"]) {
 										console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
 										console.log("Summary: "+logSummary(new Date(),socketid,"UPDATE DELIVERED FOR "+obj.id));
@@ -2848,7 +2833,8 @@ io.on("connection", function(socket){
 								from: config["srvSrcReq"]
 							}, socket.id);		
 						*/
-						io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 						
+						io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 	
+						try { bench_out(benchID); } catch(be) {}						
 						if(config["verbose"]) {
 							console.log(">> WRITE OK >>>>>>>>>>>>>>>>>>>>");
 							console.log("Summary: "+logSummary(new Date(),socket.id,"WRITE OK"));
@@ -2862,10 +2848,12 @@ io.on("connection", function(socket){
 					// Then, call the KPI Data Values API to persist the value 					
 					var xmlHttpw999 = new XMLHttpRequest();
 					xmlHttpw999.open("POST", config["setValue"].format(obj["id"], tkns[socket.id]["token"], sourceRequest, sourceId), true);
+					try { xmlHttpw999.bctx = benchID; xmlHttpw999.blbl = "POST "+config["setValue"].format(obj["id"], tkns[socket.id]["token"], sourceRequest, sourceId); } catch(ba) {}
 					xmlHttpw999.setRequestHeader("Content-Type", "application/json");
 					xmlHttpw999.onreadystatechange = function() {
 						try {
 							if(xmlHttpw999.readyState < 4) return;
+							try { bench_out(this.benchID); } catch(ba) {}
 							if(config["verbose"]) {
 									console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 									console.log("Summary: "+logSummary(new Date(),socket.id,"SET KPI API RESPONSE "+xmlHttpw999.status));
@@ -2891,6 +2879,7 @@ io.on("connection", function(socket){
 								kpis[obj.id]["value"] = obj.value;
 								kpis[obj.id]["timestamp"] = dataTime.getTime();																									
 								io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));
+								try { bench_out(benchID); } catch(be) {}
 								if(config["verbose"]) {
 									console.log(">> WRITE OK >>>>>>>>>>>>>>>>>>>>");
 									console.log("Summary: "+logSummary(new Date(),socket.id,"WRITE OK"));
@@ -2915,6 +2904,7 @@ io.on("connection", function(socket){
 								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 								if(!(kpis[obj.id] && kpis[obj.id]["editors"] && kpis[obj.id]["editors"].includes(tkns[socket.id]["username"]) && xmlHttpw999.status != 401 )) { // do not notify client about write error unless it is the first time that the user attempted writing the variable, in which case it could be important to return an error because it could due to unauthorized
 									io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"ERROR",error:xmlHttpw999.status}, (k, v) => v === undefined ? null : v)); 
+									try { bench_out(benchID); } catch(be) {}
 								}
 							}
 						}
@@ -2928,11 +2918,15 @@ io.on("connection", function(socket){
 							console.log("Error:");
 							console.log(e);
 							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-							if(!(kpis[obj.id] && kpis[obj.id]["editors"] && kpis[obj.id]["editors"].includes(tkns[socket.id]["username"]))) { // do not notify client about write error unless it is the first time that the user attempted writing the variable, in which case it could be important to return an error because it could due to unauthorized
-								io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
-							}
+							try { 	
+								if(!(kpis[obj.id] && kpis[obj.id]["editors"] && kpis[obj.id]["editors"].includes(tkns[socket.id]["username"]))) { // do not notify client about write error unless it is the first time that the user attempted writing the variable, in which case it could be important to return an error because it could due to unauthorized
+									io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+								}
+							} catch(igne){}
+							try { bench_out(benchID); } catch(be) {}
 						}
 					};					
+					try { xmlHttpw999.benchID = bench_in(xmlHttpw999.bctx,xmlHttpw999.blbl); } catch(ba) {}
 					xmlHttpw999.send(JSON.stringify({ "dataTime": dataTime.getTime(), "value": obj["value"]}));
 					if(config["verbose"]) {
 						console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
@@ -2957,6 +2951,7 @@ io.on("connection", function(socket){
 					console.log("Error: invalid target (mispelled variable name/ID?)");
 					console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 					io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"ERROR",error:"invalid target (mispelled variable name/ID?)"}, (k, v) => v === undefined ? null : v)); 
+					try { bench_out(benchID); } catch(be) {}
 				}
 			}				
 			catch(e) {
@@ -2971,10 +2966,12 @@ io.on("connection", function(socket){
 				console.log(e);
 				console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 				io.in(socket.id).emit("write",JSON.stringify({event: "write", request: data, status:"ERROR", error:e.message}, (k, v) => v === undefined ? null : v)); 
+				try { bench_out(benchID); } catch(be) {}
 			}
 		});
 		
 		socket.on("subscribe", function(data) { // a lot of what was said for "read" applies, the main difference is that here, in subscription object, isActive = true, because we not only have to track if the user is authorized, we actually have to entitle her to receive updates 
+			var benchID = null; try { benchID = bench_in(socket.id,"subscribe"); } catch(be) {}
 			try {
 				if(config["verbose"]) {
 					console.log(">> CLIENT EVENT: subscribe >>>>>>>>>>>>>>>>>>>>>>"); 
@@ -2995,7 +2992,8 @@ io.on("connection", function(socket){
 						id: data,
 						lastValue: new Buffer(data.substr(6),"base64").toString("utf8"), 
 						timestamp: new Date().getTime()
-					}, (k, v) => v === undefined ? null : v)); 
+					}, (k, v) => v === undefined ? null : v));
+					try { bench_out(benchID); } catch(be) {}					
 					if(config["verbose"]) {
 						console.log(">> SUBSCRIBE OK >>>>>>>>>>>>>>");
 						console.log("Summary: "+logSummary(new Date(),socket.id,"SUBSCRIBE OK FOR "+data));
@@ -3013,6 +3011,7 @@ io.on("connection", function(socket){
 						shared[data]["subscriptions"].push(socket.id);	
 					} 					
 					io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));  // confirm
+					try { bench_out(benchID); } catch(be) {}
 					if(config["kafka"]["enable"]["shared"]) listenBroker(data);
 					if(config["verbose"]) {
 						console.log(">> SUBSCRIBE OK >>>>>>>>>>>>>>");
@@ -3033,6 +3032,7 @@ io.on("connection", function(socket){
 								lastValue: lastValue, 
 								timestamp: shared[data]["timestamp"] 
 							}, (k, v) => v === undefined ? null : v)); 
+							try { bench_out(benchID); } catch(be) {}
 							if(config["verbose"]) {
 								console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
 								console.log("Summary: "+logSummary(new Date(),socket.id,"UPDATE DELIVERED FOR "+shared[data]["id"]));
@@ -3079,6 +3079,7 @@ io.on("connection", function(socket){
 						console.log("Error: Synoptic is loading, please wait.");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("write",JSON.stringify({event: "subscribe", request: data, status:"ERROR",error:"Synoptic is loading, please wait."}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						return;
 					}
 					if(!syns[socket.id]) { // fail if no current synoptic specified
@@ -3092,6 +3093,7 @@ io.on("connection", function(socket){
 						console.log("Error: Not binded to a synoptic.");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"ERROR",error:"Bind to a synoptic first, through the \"display\" event."}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						return;
 					}
 					if(!(syns[socket.id] && syns[socket.id]["mappings"] && syns[socket.id]["mappings"]["input"] && syns[socket.id]["mappings"]["input"][data])) { // fail if a non-mapped variable with the specified name does not exist for reading in current synoptic
@@ -3105,6 +3107,7 @@ io.on("connection", function(socket){
 						console.log("Error: variable not found, maybe a typo in variable name");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"ERROR",error:"Non-mapped variable \""+data+"\" not found in current synoptic. Maybe a typo in variable name?"}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						return;
 					}
 					if(!vars[data]) vars[data] = {}; // build empty in-memory copy of the variable to keep track of the subscription (values will arrive, maybe)
@@ -3117,6 +3120,7 @@ io.on("connection", function(socket){
 						} 
 					}
 					io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));  // confirm
+					try { bench_out(benchID); } catch(be) {}
 					if(config["kafka"]["enable"]["nonMapped"]) listenBroker(data);
 					if(config["verbose"]) {
 						console.log(">> SUBSCRIBE OK >>>>>>>>>>>>>>");
@@ -3138,6 +3142,7 @@ io.on("connection", function(socket){
 								lastValue: lastValue,
 								timestamp: vars[data][syns[socket.id]["synoptic"]]["timestamp"] 
 							}, (k, v) => v === undefined ? null : v)); 
+							try { bench_out(benchID); } catch(be) {}
 							if(config["verbose"]) {
 								console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
 								console.log("Summary: "+logSummary(new Date(),socket.id,"UPDATE DELIVERED FOR "+vars[data][syns[socket.id]["synoptic"]]["id"]));
@@ -3177,6 +3182,7 @@ io.on("connection", function(socket){
 						if(sens[data]["subscriptions"][socket.id]["isAuthorized"]) { // if the requester has been already found to have granted access to the sensor
 							sens[data]["subscriptions"][socket.id]["isActive"] = true; // just switch the subscription to active
 							io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));  // and confirm			
+							try { bench_out(benchID); } catch(be) {}
 							if(config["kafka"]["enable"]["sensors"]) listenBroker(data);
 							if(config["verbose"]) {
 								console.log(">> SUBSCRIBE OK >>>>>>>>>>>>>>");
@@ -3197,6 +3203,7 @@ io.on("connection", function(socket){
 										lastValue: lastValue, 
 										timestamp: sens[data]["timestamp"] 
 									}, (k, v) => v === undefined ? null : v)); 
+									try { bench_out(benchID); } catch(be) {}
 									if(config["verbose"]) {
 										console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
 										console.log("Summary: "+logSummary(new Date(),socket.id,"UPDATE DELIVERED FOR "+data));
@@ -3241,6 +3248,7 @@ io.on("connection", function(socket){
 							console.log("Error: unauthorized");
 							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 							io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+							try { bench_out(benchID); } catch(be) {}
 						}
 					}	
 					else { // if it is the first time that the requester attempts accessing the sensor			
@@ -3250,6 +3258,7 @@ io.on("connection", function(socket){
 						else chkUrl =  config["getOnePublicSensorValue"].format(data.split(" ")[0],data.split(" ")[1]); 
 						var xmlHttpChkc = new XMLHttpRequest();
 						xmlHttpChkc.open( "GET", chkUrl, true);
+						try { xmlHttpChkc.bctx = benchID; xmlHttpChkc.blbl = "GET "+chkUrl; } catch(ba) {}
 						if(config["verbose"]) {
 							console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 							console.log("Summary: "+logSummary(new Date(),socket.id,"SENSOR API CALL"));
@@ -3262,6 +3271,7 @@ io.on("connection", function(socket){
 						xmlHttpChkc.onreadystatechange = function() {	
 							try {
 								if(xmlHttpChkc.readyState < 4) return;
+								try { bench_out(this.benchID); } catch(ba) {}
 								if(config["verbose"]) {
 									console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 									console.log("Summary: "+logSummary(new Date(),socket.id,"SENSOR API RESPONSE "+xmlHttpChkc.status));
@@ -3276,7 +3286,11 @@ io.on("connection", function(socket){
 								var value = null;
 								var timestamp = null;
 								if(isAuthorized) { // if authorized get value
-									if(JSON.parse(xmlHttpChkc.responseText)["realtime"]["results"]) { // if the sensor actually exists (it could be that the device exists and the requester is granted, but the sensor name is mispelled, for example)
+									if("__location" == data.split(" ")[1]) {	
+										value = { "longitude": JSON.parse(xmlHttpChkc.responseText)["Service"]["features"][0]["geometry"]["coordinates"][0]+"", "latitude": JSON.parse(xmlHttpChkc.responseText)["Service"]["features"][0]["geometry"]["coordinates"][1]+"" };
+										timestamp = new Date().getTime();
+									} 
+									else if(JSON.parse(xmlHttpChkc.responseText)["realtime"]["results"] ) { // if the sensor actually exists (it could be that the device exists and the requester is granted, but the sensor name is mispelled, for example)
 										JSON.parse(xmlHttpChkc.responseText)["realtime"]["results"]["bindings"].forEach(function(binding) { 
 											value = binding[data.split(" ")[1]]["value"]; 
 											timestamp = new Date(binding["measuredTime"]["value"]).getTime();
@@ -3292,6 +3306,7 @@ io.on("connection", function(socket){
 										console.log("Error: No value. Sensor is missing or not working.");
 										console.log("<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 										io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"ERROR",error:"No value. Sensor is missing or not working."}, (k, v) => v === undefined ? null : v)); 
+										try { bench_out(benchID); } catch(be) {}
 										return;
 									}
 								}
@@ -3312,6 +3327,7 @@ io.on("connection", function(socket){
 								}
 								if(isAuthorized) { 
 									io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));
+									try { bench_out(benchID); } catch(be) {}
 									if(config["kafka"]["enable"]["sensors"]) listenBroker(data);
 									if(config["verbose"]) {
 										console.log(">> SUBSCRIBE OK >>>>>>>>>>>>>>");
@@ -3332,6 +3348,7 @@ io.on("connection", function(socket){
 												lastValue: lastValue, 
 												timestamp: sens[data]["timestamp"] 
 											}, (k, v) => v === undefined ? null : v)); 
+											try { bench_out(benchID); } catch(be) {}
 											if(config["verbose"]) {
 												console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
 												console.log("Summary: "+logSummary(new Date(),socket.id,"UPDATE DELIVERED FOR "+data));
@@ -3376,6 +3393,7 @@ io.on("connection", function(socket){
 									console.log("Error: unauthorized");
 									console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 									io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+									try { bench_out(benchID); } catch(be) {}
 								}
 							}
 							catch(e) {
@@ -3389,8 +3407,10 @@ io.on("connection", function(socket){
 								console.log(e);
 								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 								io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+								try { bench_out(benchID); } catch(be) {}
 							}
 						};
+						try { xmlHttpChkc.benchID = bench_in(xmlHttpChkc.bctx,xmlHttpChkc.blbl); } catch(ba) {}
 						xmlHttpChkc.send(null);
 					}
 				}
@@ -3399,6 +3419,7 @@ io.on("connection", function(socket){
 						if(kpis[data]["subscriptions"][socket.id]["isAuthorized"]) { // if it has already found to have granted access
 							kpis[data]["subscriptions"][socket.id]["isActive"] = true; // just switch subscription to on
 							io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 	 // and confirm						
+							try { bench_out(benchID); } catch(be) {}
 							if(config["kafka"]["enable"]["myKPIs"]) listenBroker("kpi-"+data);
 							if(config["verbose"]) {
 								console.log(">> SUBSCRIBE OK >>>>>>>>>>>>>>");
@@ -3419,6 +3440,7 @@ io.on("connection", function(socket){
 										lastValue: lastValue, 
 										timestamp: kpis[data]["timestamp"] 
 									}, (k, v) => v === undefined ? null : v)); 
+									try { bench_out(benchID); } catch(be) {}
 									if(config["verbose"]) {
 										console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
 										console.log("Summary: "+logSummary(new Date(),socket.id,"UPDATE DELIVERED FOR "+data));
@@ -3463,6 +3485,7 @@ io.on("connection", function(socket){
 							console.log("Error: unauthorized");
 							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 							io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+							try { bench_out(benchID); } catch(be) {}
 						}
 					}	
 					else {	// if it is the first time that the requester tries accessing the KPI in this socket session
@@ -3472,6 +3495,7 @@ io.on("connection", function(socket){
 						else chkUrl =  config["getOnePublicKpiValue"].format(data,sourceRequest,sourceId); 
 						var xmlHttpChkb = new XMLHttpRequest();
 						xmlHttpChkb.open( "GET", chkUrl, true);
+						try { xmlHttpChkb.bctx = benchID; xmlHttpChkb.blbl = "GET "+chkUrl; } catch(ba) {}
 						if(config["verbose"]) {
 							console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 							console.log("Summary: "+logSummary(new Date(),socket.id,"GET KPI VALUE API CALL"));
@@ -3484,6 +3508,7 @@ io.on("connection", function(socket){
 						xmlHttpChkb.onreadystatechange = function() {	
 							try {
 								if(xmlHttpChkb.readyState < 4) return;
+								try { bench_out(this.benchID); } catch(ba) {}
 								if(config["verbose"]) {
 									console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 									console.log("Summary: "+logSummary(new Date(),socket.id,"GET KPI VALUE API RESPONSE "+xmlHttpChkb.status));
@@ -3520,6 +3545,7 @@ io.on("connection", function(socket){
 								}
 								if(isAuthorized) { 
 									io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));  // confirm subscription							
+									try { bench_out(benchID); } catch(be) {}
 									if(config["kafka"]["enable"]["myKPIs"]) listenBroker("kpi-"+data);
 									if(config["verbose"]) {
 										console.log(">> SUBSCRIBE OK >>>>>>>>>>>>>>");
@@ -3540,6 +3566,7 @@ io.on("connection", function(socket){
 												lastValue: lastValue, 
 												timestamp: kpis[data]["timestamp"] 
 											}, (k, v) => v === undefined ? null : v)); 
+											try { bench_out(benchID); } catch(be) {}
 											if(config["verbose"]) {
 												console.log(">> UPDATE DELIVERED >>>>>>>>>>>>>>");
 												console.log("Summary: "+logSummary(new Date(),socket.id,"UPDATE DELIVERED FOR "+data));
@@ -3596,6 +3623,7 @@ io.on("connection", function(socket){
 									console.log("Error: unauthorized");
 									console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 									io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+									try { bench_out(benchID); } catch(be) {}
 								}
 							}
 							catch(e) {
@@ -3609,8 +3637,10 @@ io.on("connection", function(socket){
 								console.log(e);
 								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 								io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+								try { bench_out(benchID); } catch(be) {}
 							}
 						};
+						try { xmlHttpChkb.benchID = bench_in(xmlHttpChkb.bctx,xmlHttpChkb.blbl); } catch(ba) {}
 						xmlHttpChkb.send(null);
 					}
 				}
@@ -3627,10 +3657,12 @@ io.on("connection", function(socket){
 				console.log(e);
 				console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 				io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+				try { bench_out(benchID); } catch(be) {}
 			}
 		});
 		
 		socket.on("unsubscribe", function(data) { // this event is used by clients for stopping receiving updates for a given variable for which they had subscribed in current socket session
+			var benchID = null; try { benchID = bench_in(socket.id,"unsubscribe"); } catch(be) {}
 			try {
 				if(config["verbose"]) {
 					console.log(">> CLIENT EVENT: unsubscribe >>>>>>>>>>>>>>>>>>>>"); 
@@ -3645,6 +3677,7 @@ io.on("connection", function(socket){
 				}
 				if(data.startsWith("const_")) {
 					io.in(socket.id).emit("unsubscribe", JSON.stringify({event: "unsubscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));  
+					try { bench_out(benchID); } catch(be) {}
 					if(config["verbose"]) {
 						console.log(">> UNSUBSCRIBE OK >>>>>>>>>>>>");
 						console.log("Summary: "+logSummary(new Date(),socket.id,"UNSUBSCRIBE OK FOR "+data));
@@ -3659,6 +3692,7 @@ io.on("connection", function(socket){
 					if(shared[data] && shared[data]["subscriptions"] && shared[data]["subscriptions"].includes(socket.id)) { // if a subscription actually exists of the requester for this variable
 						shared[data]["subscriptions"].splice(shared[data]["subscriptions"].indexOf(socket.id),1); // delete
 						io.in(socket.id).emit("unsubscribe", JSON.stringify({event: "unsubscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));  // and confirm
+						try { bench_out(benchID); } catch(be) {}
 						if(config["verbose"]) {
 							console.log(">> UNSUBSCRIBE OK >>>>>>>>>>>>");
 							console.log("Summary: "+logSummary(new Date(),socket.id,"UNSUBSCRIBE OK FOR "+data));
@@ -3679,6 +3713,7 @@ io.on("connection", function(socket){
 						console.log("Error: subscription not found");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("unsubscribe",JSON.stringify({event: "unsubscribe", request: data, status:"ERROR",error:"subscription not found"}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 					}							
 				}
 				else if(data.startsWith("s4csvg_")) { // If the subscription to be canceled concerns a non-mapped variable
@@ -3693,11 +3728,13 @@ io.on("connection", function(socket){
 						console.log("Error: Synoptic is loading, please wait.");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("write",JSON.stringify({event: "unsubscribe", request: data, status:"ERROR",error:"Synoptic is loading, please wait."}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						return;
 					}
 					if(vars[data] && syns[socket.id] && syns[socket.id]["synoptic"] && vars[data][syns[socket.id]["synoptic"]] && vars[data][syns[socket.id]["synoptic"]]["subscriptions"] && vars[data][syns[socket.id]["synoptic"]]["subscriptions"].includes(socket.id)) { // if a subscription actually exists of the requester for this variable
 						vars[data][syns[socket.id]["synoptic"]]["subscriptions"].splice(vars[data][syns[socket.id]["synoptic"]]["subscriptions"].indexOf(socket.id),1); // delete
 						io.in(socket.id).emit("unsubscribe", JSON.stringify({event: "unsubscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));  // and confirm
+						try { bench_out(benchID); } catch(be) {}
 						if(config["verbose"]) {
 							console.log(">> UNSUBSCRIBE OK >>>>>>>>>>>>");
 							console.log("Summary: "+logSummary(new Date(),socket.id,"UNSUBSCRIBE OK FOR "+data));
@@ -3720,12 +3757,14 @@ io.on("connection", function(socket){
 						console.log("Error: subscription not found");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("unsubscribe",JSON.stringify({event: "unsubscribe", request: data, status:"ERROR",error:"subscription not found"}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 					}							
 				}
 				else if(isNaN(data)) { // if the subscription to be canceled concerns a sensor
 					if(sens[data] && sens[data]["subscriptions"][socket.id] && sens[data]["subscriptions"][socket.id]["isAuthorized"]) { // if a subscription actually exists of the requester for this variable
 						sens[data]["subscriptions"][socket.id]["isActive"] = false; // just make the subscription inactive so that you do not loose information about authorization
 						io.in(socket.id).emit("unsubscribe",JSON.stringify({event: "unsubscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));  // and confirm
+						try { bench_out(benchID); } catch(be) {}
 						var nobodyLeft = true;
 						Object.keys(sens[data]["subscriptions"]).forEach(function(socketid){
 							if(sens[data]["subscriptions"][socketid]["isActive"]) {
@@ -3789,12 +3828,14 @@ io.on("connection", function(socket){
 						console.log("Error: subscription not found");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("unsubscribe",JSON.stringify({event: "unsubscribe", request: data, status:"ERROR",error:"subscription not found"}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 					}
 				}
 				else { // if the subscription to be canceled concerns a KPI
 					if(kpis[data] && kpis[data]["subscriptions"] && kpis[data]["subscriptions"][socket.id] && kpis[data]["subscriptions"][socket.id]["isAuthorized"]) { // if a subscription actually exists of the requester for this variable
 						kpis[data]["subscriptions"][socket.id]["isActive"] = false; // just make the subscription inactive so that you do not loose information about authorization
 						io.in(socket.id).emit("unsubscribe",JSON.stringify({event: "unsubscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));  // and confirm
+						try { bench_out(benchID); } catch(be) {}
 						if(config["verbose"]) {
 							console.log(">> UNSUBSCRIBE OK >>>>>>>>>>>>");
 							console.log("Summary: "+logSummary(new Date(),socket.id,"UNSUBSCRIBE OK FOR "+data));
@@ -3815,6 +3856,7 @@ io.on("connection", function(socket){
 						console.log("Error: subscription not found");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");							
 						io.in(socket.id).emit("unsubscribe",JSON.stringify({event: "unsubscribe", request: data, status:"ERROR",error:"subscription not found"}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 					}
 				}
 				
@@ -3831,10 +3873,12 @@ io.on("connection", function(socket){
 				console.log(e);
 				console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 				io.in(socket.id).emit("unsubscribe", JSON.stringify({event: "unsubscribe", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+				try { bench_out(benchID); } catch(be) {}
 			}					
 		});
 		
 		socket.on("disconnect", function(){		
+			var benchID = null; try { benchID = bench_in(socket.id,"disconnect"); } catch(be) {}
 			try {
 				// cleanup everything related to the socket
 				delete tkns[socket.id];
@@ -3848,49 +3892,52 @@ io.on("connection", function(socket){
 							if(vars[id] && syns[socket.id] && syns[socket.id]["synoptic"] && vars[id][syns[socket.id]["synoptic"]] && vars[id][syns[socket.id]["synoptic"]]["subscriptions"].includes(socket.id)) { vars[id][syns[socket.id]["synoptic"]]["subscriptions"].splice(vars[id][syns[socket.id]["synoptic"]]["subscriptions"].indexOf(socket.id),1); }
 						}
 						else if(isNaN(id)) { // sensor
-							delete sens[id]["subscriptions"][socket.id];
-							var nobodyLeft = true;
-							Object.keys(sens[id]["subscriptions"]).forEach(function(socketid){
-								if(sens[id]["subscriptions"][socketid]["isActive"]) {
-									nobodyLeft = false;
-								}
-							});
-							if(nobodyLeft) {
-								var topic = id.toKafkaTopic();
-								if(ksbs[topic]) ksbs[topic]["consumer"].close(function(err, message) {
-									try {
-										if(!err) {
-											if(config["verbose"]) {
-												console.log(">> KAFKA CONSUMER CLOSED >>>>>>>");
-												console.log("Summary: "+logSummary(new Date(),"--","KAFKA CONSUMER CLOSED"));
-												console.log("Time: "+new Date().toString());												
-												console.log("Topic: "+topic);
-												console.log("Message: Nobody interested in this topic out there after this disconnect. Kafka Consumer has been closed and all associated metadata deleted.");
+							return;
+							if(sens[id] && sens[id]["subscriptions"] && sens[id]["subscriptions"].includes(socket.id)) {	
+								delete sens[id]["subscriptions"][socket.id];
+								var nobodyLeft = true;
+								Object.keys(sens[id]["subscriptions"]).forEach(function(socketid){
+									if(sens[id]["subscriptions"][socketid]["isActive"]) {
+										nobodyLeft = false;
+									}
+								});
+								if(nobodyLeft) {
+									var topic = id.toKafkaTopic();
+									if(ksbs[topic]) ksbs[topic]["consumer"].close(function(err, message) {
+										try {
+											if(!err) {
+												if(config["verbose"]) {
+													console.log(">> KAFKA CONSUMER CLOSED >>>>>>>");
+													console.log("Summary: "+logSummary(new Date(),"--","KAFKA CONSUMER CLOSED"));
+													console.log("Time: "+new Date().toString());												
+													console.log("Topic: "+topic);
+													console.log("Message: Nobody interested in this topic out there after this disconnect. Kafka Consumer has been closed and all associated metadata deleted.");
+													console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+												}
+												delete ksbs[topic];
+											}
+											else {
+												console.log(">> UNSUBSCRIBE NON-CRITICAL ERROR >>>>>>>");
+												console.log("Summary: "+logSummary(new Date(),"--","UNSUBSCRIBE NON-CRITICAL ERROR"));
+												console.log("Time: "+new Date().toString());
+												console.log("Error: unable to close Kafka consumer");
+												console.log("Kafka error: ");
+												console.log(err);
+												console.log("Kafka message: ");
+												console.log(message);
 												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 											}
-											delete ksbs[topic];
 										}
-										else {
+										catch(e) {
 											console.log(">> UNSUBSCRIBE NON-CRITICAL ERROR >>>>>>>");
 											console.log("Summary: "+logSummary(new Date(),"--","UNSUBSCRIBE NON-CRITICAL ERROR"));
 											console.log("Time: "+new Date().toString());
-											console.log("Error: unable to close Kafka consumer");
-											console.log("Kafka error: ");
-											console.log(err);
-											console.log("Kafka message: ");
-											console.log(message);
+											console.log("Error: unable to close Kafka consumer due to exception");
+											console.log(e);
 											console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-										}
-									}
-									catch(e) {
-										console.log(">> UNSUBSCRIBE NON-CRITICAL ERROR >>>>>>>");
-										console.log("Summary: "+logSummary(new Date(),"--","UNSUBSCRIBE NON-CRITICAL ERROR"));
-										console.log("Time: "+new Date().toString());
-										console.log("Error: unable to close Kafka consumer due to exception");
-										console.log(e);
-										console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-									}								
-								});							
+										}								
+									});							
+								}
 							}
 						}
 						else { // KPI
@@ -3927,9 +3974,11 @@ io.on("connection", function(socket){
 				console.log(e);
 				console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 			}
+			try { bench_out(benchID); } catch(be) {}
 		});	
 		
 		socket.on("clear", function(data){
+			var benchID = null; try { benchID = bench_in(socket.id,"clear"); } catch(be) {}
 			try {
 				if(config["verbose"]) {
 					console.log(">> CLIENT EVENT: clear >>>>>>>>>>>>>>>>>>>>>>>>>"); 
@@ -3951,10 +4000,12 @@ io.on("connection", function(socket){
 					console.log("Error: missing authentication");
 					console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 					io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+					try { bench_out(benchID); } catch(be) {}
 					return;
 				}
 				if(data.startsWith("const_")) {
 					io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 					
+					try { bench_out(benchID); } catch(be) {}
 					console.log(">> CLEAR OK >>>>>>>>>>");
 					console.log("Summary: "+logSummary(new Date(),socket.id,"CLEAR OK FOR "+data));
 					console.log("Time: "+new Date().toString());
@@ -4004,6 +4055,7 @@ io.on("connection", function(socket){
 								}
 							);	
 							io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 					
+							try { bench_out(benchID); } catch(be) {}
 							console.log(">> CLEAR OK >>>>>>>>>>");
 							console.log("Summary: "+logSummary(new Date(),socket.id,"CLEAR OK FOR "+data));
 							console.log("Time: "+new Date().toString());
@@ -4022,6 +4074,7 @@ io.on("connection", function(socket){
 							console.log("Error: unauthorized");
 							console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");			
 							io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 						
+							try { bench_out(benchID); } catch(be) {}
 						}
 					}
 					else {
@@ -4034,6 +4087,7 @@ io.on("connection", function(socket){
 						console.log("Error: Not Found");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");			
 						io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:"Not found"}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}						
 					}
 				}
 				else if(data.startsWith("s4csvg_")) {
@@ -4047,7 +4101,8 @@ io.on("connection", function(socket){
 						console.log("Payload: "+data);
 						console.log("Error: Synoptic is loading, please wait.");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-						io.in(socket.id).emit("write",JSON.stringify({event: "clear", request: data, status:"ERROR",error:"Synoptic is loading, please wait."}, (k, v) => v === undefined ? null : v)); 
+						io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:"Synoptic is loading, please wait."}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						return;
 					}
 					if(!syns[socket.id]) {
@@ -4059,6 +4114,7 @@ io.on("connection", function(socket){
 						console.log("Error: synoptic not specified, should have sent a display event first");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:"Bind to a synoptic through the display event first."}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 						return;
 					}
 					if(vars[data] && syns[socket.id] && syns[socket.id]["synoptic"] && vars[data][syns[socket.id]["synoptic"]]) {
@@ -4101,6 +4157,7 @@ io.on("connection", function(socket){
 								}
 							);	
 							io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 					
+							try { bench_out(benchID); } catch(be) {}
 							console.log(">> CLEAR OK >>>>>>>>>>");
 							console.log("Summary: "+logSummary(new Date(),socket.id,"CLEAR OK FOR "+data));
 							console.log("Time: "+new Date().toString());
@@ -4119,6 +4176,7 @@ io.on("connection", function(socket){
 							console.log("Error: unauthorized");
 							console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");			
 							io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 						
+							try { bench_out(benchID); } catch(be) {}
 						}
 					}
 					else {
@@ -4131,6 +4189,7 @@ io.on("connection", function(socket){
 						console.log("Error: Not Found");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");			
 						io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:"Not found"}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 					}
 				}
 				else if(!isNaN(data)) {
@@ -4138,6 +4197,7 @@ io.on("connection", function(socket){
 						if( ( kpis[data]["editors"] && tkns[socket.id] && kpis[data]["editors"].includes(tkns[socket.id]["username"]) ) || tkns[socket.id]["roles"].includes("RootAdmin")) {
 							delete kpis[data];
 							io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 							
+							try { bench_out(benchID); } catch(be) {}
 							console.log(">> CLEAR OK >>>>>>>>>>");
 							console.log("Summary: "+logSummary(new Date(),socket.id,"CLEAR OK FOR "+data));
 							console.log("Time: "+new Date().toString());
@@ -4149,6 +4209,7 @@ io.on("connection", function(socket){
 						else {
 							var xmlHttpAuth12a = new XMLHttpRequest();
 							xmlHttpAuth12a.open( "GET", config["personalDataPrivateApi"].format(tkns[socket.id]["token"],sourceRequest,sourceId), true);
+							try { xmlHttpAuth12a.bctx = benchID; xmlHttpAuth12a.blbl = "GET "+config["personalDataPrivateApi"].format(tkns[socket.id]["token"],sourceRequest,sourceId); } catch(ba) {}
 							if(config["verbose"]) {
 								console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 								console.log("Summary: "+logSummary(new Date(),socket.id,"PERSONAL DATA API CALL"));
@@ -4161,6 +4222,7 @@ io.on("connection", function(socket){
 							xmlHttpAuth12a.onreadystatechange = function() {
 								try {
 									if(xmlHttpAuth12a.readyState < 4) return;
+									try { bench_out(this.benchID); } catch(ba) {}
 									if(config["verbose"]) {
 										console.log(">> API RESPONSE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 										console.log("Summary: "+logSummary(new Date(),socket.id,"PERSONAL DATA API RESPONSE "+xmlHttpAuth12a.status));
@@ -4191,11 +4253,13 @@ io.on("connection", function(socket){
 												console.log(e);
 												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 												io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+												try { bench_out(benchID); } catch(be) {}
 											}											
 										});	
 										if(isOwner) {
 											delete kpis[data];
 											io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 							
+											try { bench_out(benchID); } catch(be) {}
 											console.log(">> CLEAR OK >>>>>>>>>>");
 											console.log("Summary: "+logSummary(new Date(),socket.id,"CLEAR OK FOR "+data));
 											console.log("Time: "+new Date().toString());
@@ -4214,6 +4278,7 @@ io.on("connection", function(socket){
 											console.log("Error: unauthorized");
 											console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");			
 											io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+											try { bench_out(benchID); } catch(be) {}
 										}
 									}
 									else {
@@ -4227,6 +4292,7 @@ io.on("connection", function(socket){
 										console.log(xmlHttpAuth12a.responseText);
 										console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 										io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:"Personal Data API response code "+xmlHttpAuth12a.status}, (k, v) => v === undefined ? null : v)); 
+										try { bench_out(benchID); } catch(be) {}
 									}
 								}
 								catch(e) {
@@ -4240,8 +4306,10 @@ io.on("connection", function(socket){
 									console.log(e);
 									console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 									io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+									try { bench_out(benchID); } catch(be) {}
 								}
 							};
+							try { xmlHttpAuth12a.benchID = bench_in(xmlHttpAuth12a.bctx,xmlHttpAuth12a.blbl); } catch(ba) {}
 							xmlHttpAuth12a.send(null);
 						}
 					}
@@ -4255,6 +4323,7 @@ io.on("connection", function(socket){
 						console.log("Error: Not Found");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");			
 						io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:"Not found"}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 					}
 				}
 				else {
@@ -4262,6 +4331,7 @@ io.on("connection", function(socket){
 						if(tkns[socket.id]["roles"] && tkns[socket.id]["roles"].includes("RootAdmin")) {
 							delete sens[data];
 							io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 
+							try { bench_out(benchID); } catch(be) {}
 							console.log(">> CLEAR OK >>>>>>>>>>");
 							console.log("Summary: "+logSummary(new Date(),socket.id,"CLEAR OK FOR "+data));
 							console.log("Time: "+new Date().toString());
@@ -4280,6 +4350,7 @@ io.on("connection", function(socket){
 							console.log("Error: unauthorized");
 							console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");			
 							io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+							try { bench_out(benchID); } catch(be) {}
 						}
 					}
 					else {
@@ -4292,6 +4363,7 @@ io.on("connection", function(socket){
 						console.log("Error: Not Found");
 						console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");			
 						io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:"Not found"}, (k, v) => v === undefined ? null : v)); 
+						try { bench_out(benchID); } catch(be) {}
 					}
 				}
 			}
@@ -4306,10 +4378,12 @@ io.on("connection", function(socket){
 				console.log(e);
 				console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");			
 				io.in(socket.id).emit("clear",JSON.stringify({event: "clear", request: data, status:"ERROR",error:e}, (k, v) => v === undefined ? null : v)); 
+				try { bench_out(benchID); } catch(be) {}
 			}
 		});
 		
 		socket.on("help", function(){
+			var benchID = null; try { benchID = bench_in(socket.id,"help"); } catch(be) {}
 			try {
 				if(config["verbose"]) {
 					console.log(">> CLIENT EVENT: help >>>>>>>>>>>>>>>>>>>>>>>>>>"); 
@@ -4332,6 +4406,7 @@ io.on("connection", function(socket){
 	- clear: through this event the client drops the in-memory copy (cache) of a variable, including its value and permissions. Typical usage: I have edited permissions on a variable, and I want to force a new verification of permissions the first time that a user makes a request through a synoptic. Only users that have writing permissions on a variable, and root admin, can dispose the removal of the in-memory copy of it.
 	- dump: through this event root admins can inspect the internal status of the socket server. Further details are kept confidential.`;
 				io.in(socket.id).emit("help", JSON.stringify({event: "help", status:"OK", quickGuide:quickGuide}, (k, v) => v === undefined ? null : v)); 
+				try { bench_out(benchID); } catch(be) {}
 			}
 			catch(e) {
 				console.log(">> HELP ERROR >>>>>>>>>>");
@@ -4343,10 +4418,12 @@ io.on("connection", function(socket){
 				console.log(e);
 				console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");			
 				io.in(socket.id).emit("help",JSON.stringify({event: "help", status:"ERROR",error:e}, (k, v) => v === undefined ? null : v)); 
+				try { bench_out(benchID); } catch(be) {}
 			}
 		});
 		
 		socket.on("setSrcReq", function(data) {
+			var benchID = null; try { benchID = bench_in(socket.id,"setSrcReq"); } catch(be) {}
 			try {
 				if(config["verbose"]) {
 					console.log(">> CLIENT EVENT: setSrcReq >>>>>>>>>>>>>>>>>>>>>>"); 
@@ -4361,6 +4438,7 @@ io.on("connection", function(socket){
 				}
 				sourceRequest = data;
 				io.in(socket.id).emit("setSrcReq",JSON.stringify({event: "setSrcReq", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 
+				try { bench_out(benchID); } catch(be) {}
 				if(config["verbose"]) {
 					console.log(">> setSrcReq OK >>>>>>>>>>>>");
 					console.log("Summary: "+logSummary(new Date(),socket.id,"SETSRCREQ OK SET TO "+data));
@@ -4382,11 +4460,13 @@ io.on("connection", function(socket){
 				console.log(e);
 				console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");			
 				io.in(socket.id).emit("setSrcReq",JSON.stringify({event: "setSrcReq", request: data, status:"ERROR",error:e}, (k, v) => v === undefined ? null : v)); 
+				try { bench_out(benchID); } catch(be) {}
 			}
 			
 		});
 		
 		socket.on("setSrcId", function(data) {
+			var benchID = null; try { benchID = bench_in(socket.id,"setSrcId"); } catch(be) {}
 			try {
 				if(config["verbose"]) {
 					console.log(">> CLIENT EVENT: setSrcId >>>>>>>>>>>>>>>>>>>>>>>"); 
@@ -4401,6 +4481,7 @@ io.on("connection", function(socket){
 				}
 				sourceId = data;
 				io.in(socket.id).emit("setSrcId",JSON.stringify({event: "setSrcId", request: data, status:"OK"}, (k, v) => v === undefined ? null : v)); 
+				try { bench_out(benchID); } catch(be) {}
 				if(config["verbose"]) {
 					console.log(">> setSrcId OK >>>>>>>>>>>>");
 					console.log("Summary: "+logSummary(new Date(),socket.id,"SETSRCID OK SET TO "+data));
@@ -4422,11 +4503,13 @@ io.on("connection", function(socket){
 				console.log(e);
 				console.log("<<<<<<<<<<<<<<<<<<<<<<\n\n");			
 				io.in(socket.id).emit("setSrcId",JSON.stringify({event: "setSrcId", request: data, status:"ERROR",error:e}, (k, v) => v === undefined ? null : v)); 
+				try { bench_out(benchID); } catch(be) {}
 			}
 			
 		});
 		
 		socket.on("dump", function(data) {
+			var benchID = null; try { benchID = bench_in(socket.id,"dump"); } catch(be) {}
 			try {
 				if(config["verbose"]) {
 					console.log(">> CLIENT EVENT: dump >>>>>>>>>>>>>>>>>>>>>>>"); 
@@ -4443,7 +4526,7 @@ io.on("connection", function(socket){
 					switch(data) {
 						case "vars":
 							console.log(vars);
-							io.in(socket.id).emit("dump",JSON.stringify({event: "dump", request: data, status:"OK", vars: vars}, (k, v) => v === undefined ? null : v)); 
+							io.in(socket.id).emit("dump",JSON.stringify({event: "dump", request: data, status:"OK", vars: vars}, (k, v) => v === undefined ? null : v)); 							
 							break;
 						case "sens":
 							console.log(sens);
@@ -4473,6 +4556,10 @@ io.on("connection", function(socket){
 							console.log(shared);
 							io.in(socket.id).emit("dump",JSON.stringify({event: "dump", request: data, status:"OK", shared: shared}, (k, v) => v === undefined ? null : v)); 
 							break;
+						case "bench":
+							console.log(bench);
+							io.in(socket.id).emit("dump",JSON.stringify({event: "dump", request: data, status:"OK", bench: bench}, (k, v) => v === undefined ? null : v)); 
+							break;							
 						default:
 							console.log(">> DUMP ERROR >>>>>>>");
 							console.log("Summary: "+logSummary(new Date(),socket.id,"DUMP ERROR FOR "+data));
@@ -4482,10 +4569,11 @@ io.on("connection", function(socket){
 							console.log("Payload: "+data);
 							console.log("Error: invalid request");
 							console.log("<<<<<<<<<<<<<<<<<<<<<\n\n");
-							io.in(socket.id).emit("dump",JSON.stringify({event: "dump", request: data, status:"ERROR",error:"Invalid request. Attached content should be one of: vars, sens, kpis, tkns, syns, clni, ksbs."}, (k, v) => v === undefined ? null : v)); 
-							return;
-							
+							io.in(socket.id).emit("dump",JSON.stringify({event: "dump", request: data, status:"ERROR",error:"Invalid request. Attached content should be one of: vars, sens, kpis, tkns, syns, clni, ksbs, bench."}, (k, v) => v === undefined ? null : v)); 
+							try { bench_out(benchID); } catch(be) {}
+							return;							
 					}
+					try { bench_out(benchID); } catch(be) {}
 					console.log(">> DUMP OK >>>>>>>");
 					console.log("Summary: "+logSummary(new Date(),socket.id,"DUMP OK FOR "+data));
 					console.log("Time: "+new Date().toString());
@@ -4506,6 +4594,7 @@ io.on("connection", function(socket){
 					console.log("Error: unauthorized");
 					console.log("<<<<<<<<<<<<<<<<<<<<<\n\n");
 					io.in(socket.id).emit("dump",JSON.stringify({event: "dump", request: data, status:"ERROR",error:"unauthorized"}, (k, v) => v === undefined ? null : v)); 
+					try { bench_out(benchID); } catch(be) {}
 					return;
 				}
 			}
@@ -4520,8 +4609,55 @@ io.on("connection", function(socket){
 				console.log(e);
 				console.log("<<<<<<<<<<<<<<<<<<<<<\n\n");
 				io.in(socket.id).emit("dump",JSON.stringify({event: "dump", request: data, status:"ERROR",error:e}, (k, v) => v === undefined ? null : v)); 
+				try { bench_out(benchID); } catch(be) {}
 				return;
 			}
+		});
+		socket.on("bench",function(data){
+			try {
+				if(config["verbose"]) {
+					console.log(">> CLIENT EVENT: bench >>>>>>>>>>>>>>>>>>>>>>>"); 
+					console.log("Summary: "+logSummary(new Date(),socket.id,"CLIENT REQUEST BENCH"));
+					console.log("Time: "+new Date().toString());
+					console.log("Socket: "+socket.id);
+					if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
+					console.log("Event: bench");
+					console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+				}
+				if(tkns[socket.id]) {
+					if( tkns[socket.id]["roles"].includes("RootAdmin") || tkns[socket.id]["username"] == "msoderi") {
+						var benchfile = config["benchmark"]["outPath"].format(""+(new Date().getTime())+".bench");
+						fs.writeFile(benchfile,JSON.stringify(bench["done"]),function(err){
+							if(!err) {
+								bench["done"]={};
+								io.in(socket.id).emit("bench",JSON.stringify({event: "bench", request: data, status:"OK", benchfile: benchfile}, (k, v) => v === undefined ? null : v)); 
+								isOk = true;
+							}
+							else {
+								throw err; 
+							}
+						});	
+					}
+					else {
+						throw "Unauthorized";
+					}
+				}
+				else {
+					throw "Unauthorized";
+				}
+			}
+			catch(e) {
+				console.log(">> BENCH ERROR >>>>>>>");
+				console.log("Summary: "+logSummary(new Date(),socket.id,"BENCH ERROR"));
+				console.log("Time: "+new Date().toString());
+				console.log("Socket: "+socket.id);
+				if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
+				console.log("Error:");
+				console.log(e);
+				console.log("<<<<<<<<<<<<<<<<<<<<<\n\n");
+				io.in(socket.id).emit("bench",JSON.stringify({event: "bench", request: data, status:"ERROR",error:e}, (k, v) => v === undefined ? null : v)); 
+				return;
+			}						
 		});
 		
 	}

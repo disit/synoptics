@@ -38,6 +38,7 @@
 				socket.on("clear", function(data){console.log(JSON.parse(data))});
 				socket.on("dump", function(data){console.log(JSON.parse(data))});
 				socket.on("help", function(data){console.log(JSON.parse(data))});
+				socket.on("bench", function(data){console.log(JSON.parse(data))});
 				$("#send").on("click",function(){ 
 					if(["read","subscribe"].includes($("#eventName").val())) {
 						socket.off("update "+$("#eventPayload").val());
@@ -121,6 +122,12 @@
 							$("#eventPayloadId").attr("placeholder","Put the KPI ID or the IOTAPP-managed variable name here");
 							$("#eventPayloadValue").attr("placeholder","Put the new value here");
 							break;	
+						case "bench":
+							$("#eventPayload").show();
+							$("#eventPayloadId").hide();
+							$("#eventPayloadValue").hide();
+							$("#eventPayload").attr("placeholder","Leave empty");
+							break;								
 					}
 				});
 			});
@@ -134,7 +141,7 @@
 		<h1>Socket Server Test Client</h1>
 		<p>Open the browser console to display messages.</p>
 		<form id="clientEvent">			
-			<p>Event Name: <select name="eventName" id="eventName"><option value=""></option><option value="authenticate">authenticate</option><option value="setSrcReq">setSrcReq</option><option value="setSrcId">setSrcId</option><option value="display">display</option><option value="subscribe">subscribe</option><option value="unsubscribe">unsubscribe</option><option value="read">read</option><option value="write">write</option><option value="clear">clear</option><option value="dump">dump</option><option value="help">help</option></select></p>
+			<p>Event Name: <select name="eventName" id="eventName"><option value=""></option><option value="authenticate">authenticate</option><option value="setSrcReq">setSrcReq</option><option value="setSrcId">setSrcId</option><option value="display">display</option><option value="subscribe">subscribe</option><option value="unsubscribe">unsubscribe</option><option value="read">read</option><option value="write">write</option><option value="clear">clear</option><option value="dump">dump</option><option value="bench">bench</option><option value="help">help</option></select></p>
 			<p id="payloadPar" style="display:none;">Payload: <input type="text" name="eventPayload" id="eventPayload" style="display:none; width:40em;"><input type="text" name="eventPayloadId" id="eventPayloadId" style="display:none; width:40em; margin-right:2em;"><input type="text" name="eventPayloadValue" id="eventPayloadValue" style="display:none; width:40em;"></p>
 			<p><input type="button" id="send" value="Send" style="display:none;"></p>
 		</form>		

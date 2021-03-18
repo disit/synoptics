@@ -15,7 +15,7 @@
 config = {
 	"httpPort": 3002,
 	"httpsPort": 3001,
-	"verbose": true,
+	"verbose": false,
 	"ownershipApi": "http://localhost/ownership-api/v1/list/?type={0}&accessToken={1}&elementId={2}",
 	"personalDataDelegatedApi": "http://localhost:8080/datamanager/api/v1/username/{0}/delegated?accessToken={1}&sourceRequest={2}&sourceId={3}&elementType={4}",
 	"personalDataPrivateApi": "http://localhost:8080/datamanager/api/v1/kpidata?accessToken={0}&sourceRequest={1}&sourceId={2}&highLevelType=MyKPI",
@@ -48,5 +48,11 @@ config = {
 		"pwd": "password",
 		"cid": "js-synoptic-client"
 	},
-	"bkpCleanItvl": 600000
+	"bkpCleanItvl": 600000,
+	"benchmark": {
+		"enabled": false,
+		"currSize": 100000,
+		"doneSize": 100000,
+		"outPath": "bench/{0}"
+	}
 };
