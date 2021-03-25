@@ -2094,7 +2094,7 @@ io.on("connection", function(socket){
 					else {	 // if it is the first time that the requester attempts reading from the sensor					
 						var chkUrl = null;
 						// We verify if the requester is authorized to access the sensor (different requests for authenticated vs non-authenticated requesters). 
-						if(tkns[socket.id]) chkUrl = config["getOneSensorValue"].format(data.split(" ")[0],data.split(" ")[1],tkns[socket.id]["token"]); 
+						if(tkns[socket.id]) chkUrl = config["getOneSensorValue"].format(data.split(" ")[0],data.split(" ")[1]); 						
 						else chkUrl =  config["getOnePublicSensorValue"].format(data.split(" ")[0],data.split(" ")[1]); 
 						var xmlHttpChkd = new XMLHttpRequest();
 						xmlHttpChkd.open( "GET", chkUrl, true);
@@ -2108,6 +2108,7 @@ io.on("connection", function(socket){
 							console.log("URL: "+chkUrl);
 							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						}
+						if(tkns[socket.id]) xmlHttpChkd.setRequestHeader("Authorization","Bearer "+tkns[socket.id]["token"]);
 						xmlHttpChkd.onreadystatechange = function() {	
 							try {
 								if(xmlHttpChkd.readyState < 4) return;
@@ -3254,7 +3255,7 @@ io.on("connection", function(socket){
 					else { // if it is the first time that the requester attempts accessing the sensor			
 						// we check to see if the requester is authorized to access the sensor (different calls for authenticated vs non-authenticated requesters)
 						var chkUrl = null;
-						if(tkns[socket.id]) chkUrl = config["getOneSensorValue"].format(data.split(" ")[0],data.split(" ")[1],tkns[socket.id]["token"]); 
+						if(tkns[socket.id]) chkUrl = config["getOneSensorValue"].format(data.split(" ")[0],data.split(" ")[1]); 
 						else chkUrl =  config["getOnePublicSensorValue"].format(data.split(" ")[0],data.split(" ")[1]); 
 						var xmlHttpChkc = new XMLHttpRequest();
 						xmlHttpChkc.open( "GET", chkUrl, true);
@@ -3268,6 +3269,7 @@ io.on("connection", function(socket){
 							console.log("URL: "+chkUrl);
 							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 						}
+						if(tkns[socket.id]) xmlHttpChkc.setRequestHeader("Authorization","Bearer "+tkns[socket.id]["token"]);
 						xmlHttpChkc.onreadystatechange = function() {	
 							try {
 								if(xmlHttpChkc.readyState < 4) return;
