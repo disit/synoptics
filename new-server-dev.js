@@ -1844,7 +1844,7 @@ io.on("connection", function(socket){
 						}
 						else {
 							console.log(">> AUTHENTICATE ERROR >>>>>>>>>>>");
-							console.log("Summary: "+logSummary(new Date(),socket.id,"AUTHENTICATION ERROR AS DEFAULT USER DUE TO KEYCLOAK USERINFO ERROR STATUS"));
+							console.log("Summary: "+logSummary(new Date(),socket.id,"AUTHENTICATION ERROR DUE TO KEYCLOAK USERINFO ERROR STATUS"));
 							console.log("Time: "+new Date().toString());
 							console.log("Socket: "+socket.id);
 							if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);

@@ -159,7 +159,7 @@ class SIOW {
 				}
 				else {
 					this.socket = io.connect();
-					this.log("Connected to socket server",LOGLEVEL_INFO);
+					this.log("Connected to local socket server",LOGLEVEL_INFO);
 				}
 			}
 			else {
