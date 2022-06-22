@@ -3322,10 +3322,12 @@ io.on("connection", function(socket){
 										subscriptions: subscriptions
 									}; 
 								}
-								else { // if an in-memory copy of the sensor exists, just add the subscription request
+								else { // if an in-memory copy of the sensor exists, just add the subscription request and update value
 									if(!Object.keys(sens[data]["subscriptions"]).includes(socket.id)) { 
 										sens[data]["subscriptions"][socket.id] = { isAuthorized: isAuthorized, isActive: isAuthorized }; 
-									} 
+									}
+									sens[data]["value"] = value;
+									sens[data]["timestamp"] = timestamp;
 								}
 								if(isAuthorized) { 
 									io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));
