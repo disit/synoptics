@@ -902,15 +902,21 @@ io.on("connection", function(socket){
 																			var preferred_username = JSON.parse(xmlHttp9x.responseText).preferred_username; 							
 																			// and now that we have her username, we can make a call to the Personal Data API to check for delegations
 																			var xmlHttpAuth12 = new XMLHttpRequest();
-																			xmlHttpAuth12.open( "GET", config["personalDataDelegatedApi"].format(preferred_username,tkns[socket.id]["token"],sourceRequest,sourceId,config["synOwnElmtType"]), true);
-																			try { xmlHttpAuth12.bctx = benchID; xmlHttpAuth12.blbl = "GET "+config["personalDataDelegatedApi"].format(preferred_username,tkns[socket.id]["token"],sourceRequest,sourceId,config["synOwnElmtType"]); } catch(ba) {}
+																			let apiUrl = null;
+																			if(config["personalDataDelegatedCheckApi"])
+																				apiUrl = config["personalDataDelegatedCheckApi"].format(data,tkns[socket.id]["token"],sourceRequest,config["synOwnElmtType"])
+																			else
+																				apiUrl = config["personalDataDelegatedApi"].format(preferred_username,tkns[socket.id]["token"],sourceRequest,sourceId,config["synOwnElmtType"]);
+																			
+																			xmlHttpAuth12.open( "GET", apiUrl, true);
+																			try { xmlHttpAuth12.bctx = benchID; xmlHttpAuth12.blbl = "GET "+apiUrl; } catch(ba) {}
 																			if(config["verbose"]) {
 																				console.log(">> API CALL >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"); 
 																				console.log("Summary: "+logSummary(new Date(),socket.id,"DELEGATIONS API CALL "+preferred_username+" "+config["synOwnElmtType"]));
 																				console.log("Time: "+new Date().toString());
 																				console.log("Socket: "+socket.id);
 																				if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
-																				console.log("URL: "+config["personalDataDelegatedApi"].format(preferred_username,tkns[socket.id]["token"],sourceRequest,sourceId,config["synOwnElmtType"]));
+																				console.log("URL: "+apiUrl);
 																				console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
 																			}
 																			xmlHttpAuth12.onreadystatechange = function() {
@@ -930,41 +936,53 @@ io.on("connection", function(socket){
 																					if(xmlHttpAuth12.status == 200) {
 																						var responseJson12 = JSON.parse(xmlHttpAuth12.responseText);
 																						var isDelegated = false;
-																						responseJson12.forEach(function(ownElmt12){
-																							try {
-																								if(ownElmt12.elementId == data && ownElmt12.elementType == config["synOwnElmtType"]) {
-																									// if we are here, she is delegated, we then provide back synoptic metas
-																									syns[socket.id] = { synoptic: data, template:template, mappings:mappings, writable:false, loading:false  };		
-																									io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"OK",template:template,mappings:mappings,writable:false}, (k, v) => v === undefined ? null : v)); 
-																									try { bench_out(benchID); } catch(be) {}
-																									isDelegated = true;
-																									if(config["verbose"]) {
-																										console.log(">> DISPLAY OK >>>>>>>");
-																										console.log("Summary: "+logSummary(new Date(),socket.id,"DISPLAY OK FOR SYNOPTIC "+data));
-																										console.log("Time: "+new Date().toString());
-																										console.log("Socket: "+socket.id);
-																										if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
-																										console.log("Synoptic: "+data);
-																										console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-																									}											
-																								}
-																							}
-																							catch(e) {
-																								console.log(">> DISPLAY ERROR >>>>>>>");
-																								console.log("Summary: "+logSummary(new Date(),socket.id,"DISPLAY ERROR FOR SYNOPTIC "+data));
-																								console.log("Time: "+new Date().toString());
-																								console.log("Socket: "+socket.id);
-																								if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
-																								console.log("Payload: "+data);
-																								console.log("Error:");
-																								console.log(e);
-																								console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-																								io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+																						if(config["personalDataDelegatedCheckApi"]) {
+																							isDelegated = responseJson12.result;
+																							if(isDelegated) {
+																								syns[socket.id] = { synoptic: data, template:template, mappings:mappings, writable:false, loading:false  };		
+																								io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"OK",template:template,mappings:mappings,writable:false}, (k, v) => v === undefined ? null : v)); 
 																								try { bench_out(benchID); } catch(be) {}
-																								socket.disconnect();
-																							}											
-																						});		
-																						if(isDelegated) return;
+																								return;
+																							}
+																						} else {
+																							responseJson12.forEach(function(ownElmt12){
+																								try {
+																									if(ownElmt12.elementId == data && ownElmt12.elementType == config["synOwnElmtType"]) {
+																										// if we are here, she is delegated, we then provide back synoptic metas
+																										syns[socket.id] = { synoptic: data, template:template, mappings:mappings, writable:false, loading:false  };		
+																										io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"OK",template:template,mappings:mappings,writable:false}, (k, v) => v === undefined ? null : v)); 
+																										try { bench_out(benchID); } catch(be) {}
+																										isDelegated = true;
+																										if(config["verbose"]) {
+																											console.log(">> DISPLAY OK >>>>>>>");
+																											console.log("Summary: "+logSummary(new Date(),socket.id,"DISPLAY OK FOR SYNOPTIC "+data));
+																											console.log("Time: "+new Date().toString());
+																											console.log("Socket: "+socket.id);
+																											if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
+																											console.log("Synoptic: "+data);
+																											console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+																										}											
+																									}
+																								}
+																								catch(e) {
+																									console.log(">> DISPLAY ERROR >>>>>>>");
+																									console.log("Summary: "+logSummary(new Date(),socket.id,"DISPLAY ERROR FOR SYNOPTIC "+data));
+																									console.log("Time: "+new Date().toString());
+																									console.log("Socket: "+socket.id);
+																									if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
+																									console.log("Payload: "+data);
+																									console.log("Error:");
+																									console.log(e);
+																									console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+																									io.in(socket.id).emit("display",JSON.stringify({event: "display", request: data, status:"ERROR",error:e.message}, (k, v) => v === undefined ? null : v)); 
+																									try { bench_out(benchID); } catch(be) {}
+																									socket.disconnect();
+																								}											
+																							});	
+																						}
+																						if(isDelegated) {
+																							return;
+																						}
 																						// If the requester is nor the owner nor delegated, we check to see if the synoptic is public. 
 																						// We have not checked it as the first thing because we need to know if the user is the owner of the synoptic,
 																						// also if the synoptic is public, because if she is the owner, she can write non-mapped variables for the specific
@@ -1844,7 +1862,7 @@ io.on("connection", function(socket){
 						}
 						else {
 							console.log(">> AUTHENTICATE ERROR >>>>>>>>>>>");
-							console.log("Summary: "+logSummary(new Date(),socket.id,"AUTHENTICATION ERROR DUE TO KEYCLOAK USERINFO ERROR STATUS"));
+							console.log("Summary: "+logSummary(new Date(),socket.id,"AUTHENTICATION ERROR AS DEFAULT USER DUE TO KEYCLOAK USERINFO ERROR STATUS"));
 							console.log("Time: "+new Date().toString());
 							console.log("Socket: "+socket.id);
 							if(tkns[socket.id]) console.log("User: "+tkns[socket.id]["username"]);
@@ -3322,12 +3340,10 @@ io.on("connection", function(socket){
 										subscriptions: subscriptions
 									}; 
 								}
-								else { // if an in-memory copy of the sensor exists, just add the subscription request and update value
+								else { // if an in-memory copy of the sensor exists, just add the subscription request
 									if(!Object.keys(sens[data]["subscriptions"]).includes(socket.id)) { 
 										sens[data]["subscriptions"][socket.id] = { isAuthorized: isAuthorized, isActive: isAuthorized }; 
-									}
-									sens[data]["value"] = value;
-									sens[data]["timestamp"] = timestamp;
+									} 
 								}
 								if(isAuthorized) { 
 									io.in(socket.id).emit("subscribe",JSON.stringify({event: "subscribe", request: data, status:"OK"}, (k, v) => v === undefined ? null : v));
