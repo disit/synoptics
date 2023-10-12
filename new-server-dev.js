@@ -171,7 +171,7 @@ var listenBroker = async function(newtopic) {
 						}; 
 					}
 					else {
-						sens[id]["value"] = obj.value?obj.value:obj.value_str?obj.value_str:JSON.stringify(obj.value_obj);
+						sens[id]["value"] = obj.value!==undefined ? obj.value : obj.value_str!==undefined ? obj.value_str : JSON.stringify(obj.value_obj);
 						sens[id]["timestamp"] = new Date(obj.date_time).getTime();
 					}
 					Object.keys(sens[id]["subscriptions"]).forEach(function(socketid){
