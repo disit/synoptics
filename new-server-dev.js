@@ -4733,9 +4733,18 @@ function handleDisconnect() {
 																// If you're also serving http, display a 503 error.
 	connection.on('error', function(err) {
 		console.log('db error', err);								// Connection to the MySQL server is usually
-		if(err.code === 'PROTOCOL_CONNECTION_LOST' || err.fatal) { 	// lost due to either server restart, or a
+		if(err.code === 'PROTOCOL_CONNECTION_LOST') { 	// lost due to either server restart, or a
 			handleDisconnect();                         			// connnection idle timeout (the wait_timeout
-		} 															// server variable configures this)									
+		} else if(err.fatal) {										// server variable configures this)
+			console.log(">> DB FATAL ERROR >>>>>>>");
+			console.log("Summary: "+logSummary(new Date(),"--","DB ERROR"));
+			console.log("Time: "+new Date().toString());
+			console.log("Error occurred while connecting to the database");
+			console.log("MySql error follows:");
+			console.log(err);
+			console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+			process.exit(1);
+		}
 	});
 	
 }
