@@ -466,6 +466,7 @@ var listenBroker = async function(newtopic) {
 											console.log("due to the following error:");
 											console.log(error);
 											console.log("<<<<<<<<<<<<<<<<<<<\n\n");
+											checkDBFatalError(err)
 										}
 										else if(config["verbose"]) {
 											console.log(">> DB BACKUP OK >>>>>>>");
@@ -590,6 +591,7 @@ var listenBroker = async function(newtopic) {
 											console.log("due to the following error:");
 											console.log(error);
 											console.log("<<<<<<<<<<<<<<<<<<<\n\n");
+											checkDBFatalError(err)
 										}
 										else if(config["verbose"]) {
 											console.log(">> DB BACKUP OK >>>>>>>");
@@ -2526,6 +2528,7 @@ io.on("connection", function(socket){
 										console.log("due to the following error:");
 										console.log(error);
 										console.log("<<<<<<<<<<<<<<<<<<<\n\n");
+										checkDBFatalError(err)
 									}
 									else if(config["verbose"]) {
 										console.log(">> DB BACKUP OK >>>>>>>");
@@ -2718,6 +2721,7 @@ io.on("connection", function(socket){
 										console.log("due to the following error:");
 										console.log(error);
 										console.log("<<<<<<<<<<<<<<<<<<<\n\n");
+										checkDBFatalError(err)
 									}
 									else if(config["verbose"]) {
 										console.log(">> DB BACKUP OK >>>>>>>");
@@ -4052,6 +4056,7 @@ io.on("connection", function(socket){
 											console.log("Could not clear MySQL database from variable "+data+" due to the following error:");
 											console.log(error);
 											console.log("<<<<<<<<<<<<<<<<<<<\n\n");
+											checkDBFatalError(err)
 										}
 										else if(config["verbose"]) {
 											console.log(">> DB CLEAR OK >>>>>>>");
@@ -4154,6 +4159,7 @@ io.on("connection", function(socket){
 											console.log("Could not clear MySQL database from variable "+data+" due to the following error:");
 											console.log(error);
 											console.log("<<<<<<<<<<<<<<<<<<<\n\n");
+											checkDBFatalError(err)
 										}
 										else if(config["verbose"]) {
 											console.log(">> DB CLEAR OK >>>>>>>");
@@ -4749,6 +4755,13 @@ function handleDisconnect() {
 	
 }
 
+function checkDBFatalError(err) {
+	if(err && err.fatal) {
+		console.log(">> DB FATAL ERROR RESTARTING >>>>>>>");
+		process.exit(1);
+	}
+}
+
 handleDisconnect();
 
 // <<<< NEW WAY OF CONNECTING TO DATABASE <<
@@ -4804,6 +4817,7 @@ try {
 							console.log("MySql error follows:");
 							console.log(error);
 							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+							checkDBFatalError(err)
 						}
 						else {
 							if(config["verbose"]) {
@@ -4847,8 +4861,9 @@ try {
 												console.log("Summary: "+logSummary(new Date(),"--","DB ERROR IN PERIODIC BACKUP CLEANING"));
 												console.log("Time: "+new Date().toString());
 												console.log("Error: Could not load non-mapped and shared variables from the database due to the following error:");
-												console.log(error);
+												console.log(error);											
 												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+												checkDBFatalError(err)
 											}
 										}
 										catch(e) {
@@ -4872,6 +4887,7 @@ try {
 					console.log("Error: Could not load non-mapped and shared variables from the database due to the following error:");
 					console.log(error);
 					console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
+					checkDBFatalError(err)
 				}
 			} catch(e) {
 				console.log(">> LOADING ERROR >>>>>>>>>>>>>");
