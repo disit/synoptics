@@ -466,7 +466,7 @@ var listenBroker = async function(newtopic) {
 											console.log("due to the following error:");
 											console.log(error);
 											console.log("<<<<<<<<<<<<<<<<<<<\n\n");
-											checkDBFatalError(err)
+											checkDBFatalError(error)
 										}
 										else if(config["verbose"]) {
 											console.log(">> DB BACKUP OK >>>>>>>");
@@ -591,7 +591,7 @@ var listenBroker = async function(newtopic) {
 											console.log("due to the following error:");
 											console.log(error);
 											console.log("<<<<<<<<<<<<<<<<<<<\n\n");
-											checkDBFatalError(err)
+											checkDBFatalError(error)
 										}
 										else if(config["verbose"]) {
 											console.log(">> DB BACKUP OK >>>>>>>");
@@ -2528,7 +2528,7 @@ io.on("connection", function(socket){
 										console.log("due to the following error:");
 										console.log(error);
 										console.log("<<<<<<<<<<<<<<<<<<<\n\n");
-										checkDBFatalError(err)
+										checkDBFatalError(error)
 									}
 									else if(config["verbose"]) {
 										console.log(">> DB BACKUP OK >>>>>>>");
@@ -2721,7 +2721,7 @@ io.on("connection", function(socket){
 										console.log("due to the following error:");
 										console.log(error);
 										console.log("<<<<<<<<<<<<<<<<<<<\n\n");
-										checkDBFatalError(err)
+										checkDBFatalError(error)
 									}
 									else if(config["verbose"]) {
 										console.log(">> DB BACKUP OK >>>>>>>");
@@ -4056,7 +4056,7 @@ io.on("connection", function(socket){
 											console.log("Could not clear MySQL database from variable "+data+" due to the following error:");
 											console.log(error);
 											console.log("<<<<<<<<<<<<<<<<<<<\n\n");
-											checkDBFatalError(err)
+											checkDBFatalError(error)
 										}
 										else if(config["verbose"]) {
 											console.log(">> DB CLEAR OK >>>>>>>");
@@ -4159,7 +4159,7 @@ io.on("connection", function(socket){
 											console.log("Could not clear MySQL database from variable "+data+" due to the following error:");
 											console.log(error);
 											console.log("<<<<<<<<<<<<<<<<<<<\n\n");
-											checkDBFatalError(err)
+											checkDBFatalError(error)
 										}
 										else if(config["verbose"]) {
 											console.log(">> DB CLEAR OK >>>>>>>");
@@ -4817,7 +4817,7 @@ try {
 							console.log("MySql error follows:");
 							console.log(error);
 							console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-							checkDBFatalError(err)
+							checkDBFatalError(error)
 						}
 						else {
 							if(config["verbose"]) {
@@ -4863,7 +4863,7 @@ try {
 												console.log("Error: Could not load non-mapped and shared variables from the database due to the following error:");
 												console.log(error);											
 												console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-												checkDBFatalError(err)
+												checkDBFatalError(error)
 											}
 										}
 										catch(e) {
@@ -4887,7 +4887,7 @@ try {
 					console.log("Error: Could not load non-mapped and shared variables from the database due to the following error:");
 					console.log(error);
 					console.log("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n\n");
-					checkDBFatalError(err)
+					checkDBFatalError(error)
 				}
 			} catch(e) {
 				console.log(">> LOADING ERROR >>>>>>>>>>>>>");
